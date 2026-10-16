@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .errors import UsageError, VrgenError
+from .paths import templates_dir
+from .prep.prompt import GEOMETRY_KEYS, template_placeholders
 from .round.ledger import Run, RunStore
 
 PROMPT_VARS = "prompt-vars.toml"
@@ -101,6 +103,73 @@ def apply_set(pv: PromptVars, overrides: dict[str, str]) -> PromptVars:
     merged = PromptVars(template=pv.template, vars=dict(pv.vars))
     merged.vars.update(overrides)
     return merged
+
+
+# ── 提示词模板 + 变量的读改视图（CLI prompt show/save 的本体）────────────
+
+
+def _resolve_template(template: str | None, pv: PromptVars,
+                      config_default: str | None) -> str | None:
+    """生效模板：显式指定 > 草稿记录 > 配置默认。"""
+    resolved = template or pv.template or (
+        str(config_default).strip() if config_default else None)
+    if resolved and not (templates_dir() / f"{resolved}.md").is_file():
+        available = sorted(p.stem for p in templates_dir().glob("*.md"))
+        raise UsageError(f"模板 {resolved!r} 不存在；可用：{available}")
+    return resolved or None
+
+
+def prompt_overview(workdir, job, template: str | None = None,
+                    config_default: str | None = None) -> dict:
+    """``prompt show`` 的本体：生效模板、正文、占位符、几何键、草稿 vars。
+
+    返回结构是 CLI 契约（docs/case-model.md §4），JSON 输出给调用方（web）解析；
+    还没选过模板时 template_text 为 null、其余照常，页面据此显示空态。
+    """
+    pv = load_prompt_vars(workdir, job)
+    resolved = _resolve_template(template, pv, config_default)
+    overview: dict = {
+        "template": resolved,
+        "available": sorted(p.stem for p in templates_dir().glob("*.md")),
+        "template_text": None,
+        "placeholders": [],
+        "geometry_keys": [],
+        "vars": pv.vars,
+    }
+    if resolved:
+        text = (templates_dir() / f"{resolved}.md").read_text(encoding="utf-8")
+        placeholders = template_placeholders(text)
+        overview.update(template_text=text,
+                        placeholders=placeholders,
+                        geometry_keys=[k for k in placeholders if k in GEOMETRY_KEYS])
+    return overview
+
+
+def edit_prompt_vars(workdir, job, sets: dict[str, str] | None = None,
+                     unsets: list[str] | None = None, template: str | None = None,
+                     config_default: str | None = None) -> dict:
+    """``prompt save`` 的本体：改草稿并写回，返回保存后的 :func:`prompt_overview`。
+
+    与 submit ``--set`` 的差别：这里是草稿编辑器，允许出现新键；模板正文引用的
+    键不许删（删了 submit 时模板展开必失败，这里提前 fail loud）。
+    """
+    pv = load_prompt_vars(workdir, job)
+    resolved = _resolve_template(template, pv, config_default)
+    if unsets and resolved:
+        protected = set(template_placeholders(
+            (templates_dir() / f"{resolved}.md").read_text(encoding="utf-8")))
+        blocked = sorted(protected & set(unsets))
+        if blocked:
+            raise UsageError(f"变量 {blocked} 被模板正文引用，不能删除；只能修改它的值")
+    merged = dict(pv.vars)
+    merged.update(sets or {})
+    for key in unsets or []:
+        if key not in merged:
+            known = ", ".join(sorted(merged)) or "(空)"
+            raise UsageError(f"未知变量 {key!r}；本 job 可用：{known}")
+        del merged[key]
+    save_prompt_vars(workdir, job, PromptVars(template=resolved, vars=merged))
+    return prompt_overview(workdir, job, config_default=config_default)
 
 
 # ── 轮次（台账本体在 round/ledger.py，这里做 job 分组视图）───────────────

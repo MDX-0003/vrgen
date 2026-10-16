@@ -14,6 +14,7 @@ template, different brief.
 from __future__ import annotations
 
 import hashlib
+import re
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
@@ -28,6 +29,20 @@ GEOMETRY_KEYS = (
     "main_first", "main_last", "main_w", "right_first", "right_last",
     "source_w", "source_h", "scale_pct",
 )
+
+_PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def template_placeholders(template_text: str) -> list[str]:
+    """模板正文引用的全部 ``{键}``，按首次出现顺序去重。
+
+    只认标识符形态的占位符；字面量花括号（``{{…}}``）按尽力而为处理——正文真有
+    花括号时 render 在 format 阶段就会报 malformed，不会静默出错。
+    """
+    seen: dict[str, None] = {}
+    for m in _PLACEHOLDER.finditer(template_text):
+        seen.setdefault(m.group(1), None)
+    return list(seen)
 
 
 def geometry_variables(geom: UploadGeometry) -> dict[str, object]:

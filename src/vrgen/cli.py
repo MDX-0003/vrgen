@@ -7,6 +7,7 @@ M3：register/status/result（manual 后端）。
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -267,8 +268,60 @@ def peek(task_id: int = typer.Argument(..., help="平台任务 id（零额度查
           f"(known: {TASK_STATES.get(code, code)})")
 
 
-# ── manual 后端（M3）─────────────────────────────────────────────────────
+# ── 提示词模板与变量草稿（web 提示词编辑界面的数据源，决策 18）────────────
 
+prompt_app = typer.Typer(
+    help="提示词模板与变量草稿：show 读、save 写；JSON 输出（契约 case-model.md §4）。",
+    no_args_is_help=True,
+)
+app.add_typer(prompt_app, name="prompt")
+
+
+def _prompt_default() -> str:
+    return str(config_mod.load().get("mglc.prompt_template") or "")
+
+
+def _echo_payload(payload: dict) -> None:
+    # ensure_ascii：输出纯 ASCII，Windows 控制台/管道编码差异不再可能咬人
+    typer.echo(json.dumps(payload, ensure_ascii=True, indent=1))
+
+
+@prompt_app.command("show")
+def prompt_show(
+    job: str = typer.Option(..., "--job", help="job 名（调用方通常传 case 名）。"),
+    template: str = typer.Option(None, "--template", help="覆盖草稿/配置的模板选择。"),
+    workdir: Path = typer.Option(None, "--workdir", help="台账根（默认 $VRGEN_RUNS_DIR）。"),
+) -> None:
+    """读模板与变量草稿：正文、占位符、几何键、[vars] 当前值。"""
+    try:
+        payload = jobs.prompt_overview(workdir, job, template=template,
+                                       config_default=_prompt_default())
+    except VrgenError as exc:
+        _fail(exc)
+    _echo_payload(payload)
+
+
+@prompt_app.command("save")
+def prompt_save(
+    job: str = typer.Option(..., "--job", help="job 名（调用方通常传 case 名）。"),
+    sets: list[str] = typer.Option(None, "--set",
+                                   help="新增或覆盖变量 k=v（允许新键，直接写入草稿）。"),
+    unsets: list[str] = typer.Option(None, "--unset",
+                                     help="删除变量；模板正文引用的键拒绝删除。"),
+    template: str = typer.Option(None, "--template", help="切换模板 id（必须存在）。"),
+    workdir: Path = typer.Option(None, "--workdir", help="台账根（默认 $VRGEN_RUNS_DIR）。"),
+) -> None:
+    """编辑变量草稿并写回 prompt-vars.toml（JSON 回显保存后的状态）。"""
+    try:
+        payload = jobs.edit_prompt_vars(workdir, job, sets=_parse_kv(sets),
+                                        unsets=unsets, template=template,
+                                        config_default=_prompt_default())
+    except VrgenError as exc:
+        _fail(exc)
+    _echo_payload(payload)
+
+
+# ── manual 后端（M3）─────────────────────────────────────────────────────
 
 @app.command()
 def register(
