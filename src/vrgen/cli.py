@@ -12,6 +12,7 @@ from . import __version__
 app = typer.Typer(
     help="视频生成服务：mglc(Seedance) 与手动注册双后端，统一轮次台账。",
     no_args_is_help=True,
+    invoke_without_command=True,   # 允许 `vrgen --version` 这类不带子命令的调用
 )
 
 _NOT_IMPLEMENTED = (
