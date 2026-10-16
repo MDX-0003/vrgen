@@ -1,50 +1,41 @@
-"""jobs / ledger / manual 的单元测试。"""
+"""jobs / manual 的单元测试（台账本体迁至 round/ledger.py 后的适配版）。"""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
 from vrgen import jobs, manual
 from vrgen.errors import UsageError, VrgenError
-from vrgen.ledger import RESULT_MP4, RUN_JSON, RunRecord, now_utc
+from vrgen.round.ledger import RUN_FILE as RUN_JSON
+from vrgen.round.ledger import Run, RunStore
 
-# ── ledger 往返 ──────────────────────────────────────────────────────────
-
-
-def _record(**kw) -> RunRecord:
-    base = dict(
-        job="t", round="manual-00000000", backend="manual", stage="done",
-        created_utc=now_utc(),
-        result={"path": RESULT_MP4, "source": "x.mp4", "bytes": 3, "sha256": "0" * 64},
-        gate={"verdict": "ok", "width": 100, "height": 50},
-    )
-    base.update(kw)
-    return RunRecord(**base)
+# ── ledger 往返（契约字段：docs/case-model.md §5）────────────────────────
 
 
-def test_ledger_round_trip(tmp_path):
-    rd = tmp_path / "t" / "manual-00000000"
-    record = _record(params={"resolution": "1080p"}, notes="历史素材")
-    path = record.save(rd)
-    back = RunRecord.load(rd)
-    assert back.job == record.job and back.round == record.round
-    assert back.result == record.result and back.gate == record.gate
-    assert back.params == {"resolution": "1080p"} and back.notes == "历史素材"
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    for key in ("schema", "stage", "params", "prompt", "assets", "task_id",
-                "result", "gate", "notes"):
-        assert key in raw, f"契约字段缺失: {key}"       # docs/case-model.md §5
+def _run(key: str, tmp: Path, **kw) -> Run:
+    rd = tmp / key
+    rd.mkdir(parents=True, exist_ok=True)
+    run = Run(key=key, dir=rd, **kw)
+    run.save()
+    return run
 
 
-def test_ledger_rejects_wrong_schema(tmp_path):
-    rd = tmp_path / "t" / "r"
-    rd.mkdir(parents=True)
-    (rd / RUN_JSON).write_text(json.dumps({"schema": 99}), encoding="utf-8")
-    with pytest.raises(VrgenError):
-        RunRecord.load(rd)
+def test_run_round_trip_and_contract_fields(tmp_path):
+    run = _run("abc123", tmp_path, stage="checked",
+               params={"backend": "mglc", "model_id": 37},
+               prompt="【任务】…", gate={"verdict": "ok", "width": 2334},
+               result=str(tmp_path / "abc123" / "result.mp4"),
+               updated_utc="2026-10-16T00:00:00Z")
+    back = Run.load(tmp_path / "abc123")
+    assert back.key == run.key and back.params == run.params
+    assert back.gate == run.gate and back.result == run.result
+    import json
+    raw = json.loads((tmp_path / "abc123" / RUN_JSON).read_text(encoding="utf-8"))
+    for field_ in ("key", "stage", "params", "prompt", "assets", "task_id",
+                   "result", "gate", "notes"):
+        assert field_ in raw, f"契约字段缺失: {field_}"
 
 
 # ── prompt-vars：--set 自适应的核心 ──────────────────────────────────────
@@ -66,12 +57,10 @@ def test_apply_set_adapts_to_new_fields(tmp_path):
     pv = jobs.load_prompt_vars(tmp_path, "job1")
     merged = jobs.apply_set(pv, {"theme": "夜晚"})
     assert merged.vars["theme"] == "夜晚" and merged.vars["style"] == "电影感"
-    # 草稿里加一个全新字段
     path = jobs.prompt_vars_path(tmp_path, "job1")
     path.write_text(path.read_text(encoding="utf-8") + 'mood = "安静"\n', encoding="utf-8")
     pv2 = jobs.load_prompt_vars(tmp_path, "job1")
-    merged2 = jobs.apply_set(pv2, {"mood": "紧张"})
-    assert merged2.vars["mood"] == "紧张"
+    assert jobs.apply_set(pv2, {"mood": "紧张"}).vars["mood"] == "紧张"
 
 
 def test_apply_set_unknown_key_fails_loud(tmp_path):
@@ -100,11 +89,16 @@ def test_workdir_precedence(tmp_path, monkeypatch):
 # ── 轮次列举 / latest 语义 ───────────────────────────────────────────────
 
 
-def _make_round(workdir, job, key, gate, created):
-    rd = jobs.new_round_dir(workdir, job, key)
-    _record(job=job, round=key, gate={"verdict": gate}, created_utc=created).save(rd)
-    (rd / RESULT_MP4).write_bytes(b"x")
-    return rd
+def _make_round(workdir, job, key, gate, updated, result=True):
+    rd = jobs.job_dir(workdir, job) / key
+    rd.mkdir(parents=True, exist_ok=True)
+    run = Run(key=key, dir=rd, stage="checked", gate={"verdict": gate},
+              updated_utc=updated)
+    if result:
+        (rd / "result.mp4").write_bytes(b"x")
+        run.result = str(rd / "result.mp4")
+    run.save()
+    return run
 
 
 def test_latest_usable_skips_error_rounds(tmp_path):
@@ -112,13 +106,18 @@ def test_latest_usable_skips_error_rounds(tmp_path):
     _make_round(tmp_path, "j", "manual-bbbb2222", "error", "2026-01-02T00:00:00Z")
     _make_round(tmp_path, "j", "manual-cccc3333", "ok", "2026-01-03T00:00:00Z")
     _make_round(tmp_path, "j", "manual-dddd4444", "skipped", "2026-01-04T00:00:00Z")
-    latest = jobs.latest_usable_round(tmp_path, "j")
-    assert latest.round == "manual-dddd4444"   # skipped 也算可用，取最新
+    assert jobs.latest_usable_round(tmp_path, "j").key == "manual-dddd4444"
 
 
-def test_latest_usable_with_no_rounds_raises(tmp_path):
+def test_latest_usable_requires_a_result_file(tmp_path):
+    _make_round(tmp_path, "j", "manual-eeee5555", "ok", "2026-01-05T00:00:00Z", result=False)
     with pytest.raises(VrgenError):
-        jobs.latest_usable_round(tmp_path, "empty")
+        jobs.latest_usable_round(tmp_path, "j")
+
+
+def test_find_round_by_key_prefix(tmp_path):
+    _make_round(tmp_path, "j", "manual-ffff6666", "ok", "2026-01-06T00:00:00Z")
+    assert jobs.find_round(tmp_path, "j", "manual-ffff").key == "manual-ffff6666"
 
 
 # ── manual 注册 ──────────────────────────────────────────────────────────
@@ -129,15 +128,23 @@ def test_register_is_idempotent_and_content_addressed(tmp_path):
     f.write_bytes(b"fake video bytes")
     r1 = manual.register("job1", f, workdir=tmp_path)
     r2 = manual.register("job1", f, workdir=tmp_path)
-    assert r1.round == r2.round == "manual-" + r1.result["sha256"][:8]
-    assert (tmp_path / "job1" / r1.round / RESULT_MP4).read_bytes() == b"fake video bytes"
-    # 草稿目录不因注册而出现（register 不碰提示词）
-    assert not jobs.prompt_vars_path(tmp_path, "job1").exists()
+    assert r1.key == r2.key == "manual-" + r1.params["sha256"][:8]
+    assert (tmp_path / "job1" / r1.dir.name / "result.mp4").read_bytes() == b"fake video bytes"
+    assert (tmp_path / "job1" / r1.dir.name / RUN_JSON).is_file()
+    assert r1.params["backend"] == "manual"
+    assert not jobs.prompt_vars_path(tmp_path, "job1").exists()   # register 不碰提示词
 
 
 def test_register_gate_on_real_video_is_ok_or_skipped(tmp_path, util_video):
-    """真视频在有 ffprobe 的机器上 gate=ok；没有 ffprobe 则 skipped——两者都放行。
-    假字节文件在两种环境下都最多 skipped（ffprobe 跑不起来），不会 error。"""
     r = manual.register("job1", util_video, workdir=tmp_path)
     assert r.gate["verdict"] in ("ok", "skipped")
-    assert r.stage == "done"
+    assert r.stage == "checked"
+
+
+def test_runstore_still_refuses_duplicate_keys(tmp_path):
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"v")
+    store = RunStore(tmp_path / "runs")
+    store.create("k" * 20, params={}, prompt="p", upload=video)
+    with pytest.raises(VrgenError):
+        store.create("k" * 20, params={}, prompt="p")

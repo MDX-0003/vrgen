@@ -1,0 +1,29 @@
+# vrgen 默认配置。[mglc] 段 ← vrpad 的 [aigc] 段迁入，键名不变（键值语义见
+# vrpad 时代留下的注释；分层加载与 --set 语义见 src/vrgen/config.py）。
+
+schema = 1
+
+[mglc]
+# --- 模型与请求 ---
+# Seedance 2.5：唯一提供 videoEdit（结构锁定式编辑）的型号。
+# 22=2.0 / 23=2.0 Fast 只接受语义参考；14=1.5 Pro 不接受输入视频。
+model_id         = 37
+mode             = "videoEdit"
+resolution       = "1080p"   # 480p | 720p | 1080p（2.5 最高 1080p）
+duration_s       = 0        # 0 = 按输入帧数/fps 向上取整到整数秒（平台要求 >= 4）
+aspect_ratio     = "21:9"
+num              = 1        # 单次生成数量 1..4
+keep_original_sound = true  # 不带上原声，成片就没有音轨（实测缺陷）
+
+# --- 上传件 ---
+scale            = "auto"   # auto（限额内最大）| full | half | quarter | WxH
+upload_crf       = 16       # 模型输出上限 1080p 档，再高没意义
+prompt_template  = "360-closure"   # templates/<id>.md；job 的 prompt-vars 可覆盖
+
+# --- 平台 ---
+mglc_bin         = ""       # 留空则依次找 $VRGEN_MGLC_BIN、这里的路径、PATH
+model_list_url   = "https://aigc.mgtv.com/api/v1/aitools/videoModelList"
+models_max_age_h = 24.0
+poll_interval_s  = 20.0
+poll_timeout_s   = 3600.0   # 平台自报 2.5 约 8 分钟，留足余量
+review_timeout_s = 1800.0   # SD 合规素材审核是异步的

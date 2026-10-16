@@ -1,0 +1,126 @@
+"""Render the handoff prompt: a fixed block plus this round's variable block.
+
+The fixed block is the part that must be *byte-identical across rounds* -- it is
+what keeps the model's behaviour stable while the theme changes -- and the numbers
+in it (canvas size, band width, column ranges) must match the file being uploaded.
+Hand-copying them is exactly the mistake this module exists to prevent: upload at
+half scale and a hand-written "4668x2000, columns 0-667" now describes a file that
+does not exist. So the numbers are rendered from an ``UploadGeometry``.
+
+The variable block comes from a per-round "brief" file, so a round is: same
+template, different brief.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import tomllib
+from collections.abc import Mapping
+from pathlib import Path
+
+from ..errors import AigcError
+from .scale import UploadGeometry
+
+#: Placeholders offered to a template, on top of whatever the brief defines.
+GEOMETRY_KEYS = (
+    "canvas_w", "canvas_h", "upload_w", "upload_h",
+    "band_w", "band_half", "band_pct", "band_last_left", "left_first", "left_last",
+    "main_first", "main_last", "main_w", "right_first", "right_last",
+    "source_w", "source_h", "scale_pct",
+)
+
+
+def geometry_variables(geom: UploadGeometry) -> dict[str, object]:
+    """The placeholder values that describe the upload raster."""
+    w, h = geom.canvas_size
+    left, main, right = geom.region_left, geom.region_main, geom.region_right
+    return {
+        "canvas_w": w,
+        "canvas_h": h,
+        "upload_w": w,
+        "upload_h": h,
+        "source_w": geom.source_size[0],
+        "source_h": geom.source_size[1],
+        "band_w": geom.band_w,
+        "band_half": geom.P,
+        "band_pct": f"{100 * geom.band_w / w:.1f}",
+        "band_last_left": geom.band_w - 1,
+        "left_first": left[0],
+        "left_last": left[1] - 1,
+        "main_first": main[0],
+        "main_last": main[1] - 1,
+        "main_w": main[1] - main[0],
+        "right_first": right[0],
+        "right_last": right[1] - 1,
+        "scale_pct": f"{100 * geom.scale:.1f}",
+    }
+
+
+class _Variables(dict):
+    """A dict that names the offender when a template asks for an unknown key."""
+
+    def __missing__(self, key: str):
+        known = ", ".join(sorted(self))
+        raise AigcError(
+            f"prompt template uses {{{key}}}, which nothing defines.\n"
+            f"  available: {known}\n"
+            f"  (geometry keys come from the manifest; anything else must be in the brief)"
+        )
+
+
+def load_brief(path: str | Path) -> dict[str, str]:
+    """A per-round brief: TOML with string values, or plain text as ``{brief}``."""
+    path = Path(path)
+    if not path.is_file():
+        raise AigcError(f"brief not found: {path}")
+    text = path.read_text(encoding="utf-8")
+    if path.suffix.lower() == ".toml":
+        try:
+            raw = tomllib.loads(text)
+        except tomllib.TOMLDecodeError as exc:
+            raise AigcError(f"brief {path}: {exc}") from exc
+        out: dict[str, str] = {}
+        for key, value in raw.items():
+            if isinstance(value, dict):
+                raise AigcError(f"brief {path}: [{key}] tables are not supported; "
+                                f"use flat keys such as theme / style")
+            out[key] = str(value)
+        return out
+    return {"brief": text.strip()}
+
+
+def render(template_text: str, variables: Mapping[str, object]) -> str:
+    """Fill a template. Unknown placeholders are an error, not empty text."""
+    try:
+        return template_text.format_map(_Variables(variables))
+    except AigcError:
+        raise
+    except (IndexError, ValueError) as exc:      # stray { } in the template
+        raise AigcError(f"prompt template is malformed: {exc}") from exc
+
+
+def resolve_template(template: str | Path, base: str | Path) -> Path:
+    """Absolute template paths stay as they are; relative ones resolve from ``base``.
+
+    ``base`` is the repo root, so the shipped default (``config/aigc-prompt-360.md``)
+    is found no matter which directory the command was run from.
+    """
+    path = Path(template)
+    return path if path.is_absolute() else Path(base) / path
+
+
+def render_files(template: str | Path, geom: UploadGeometry,
+                 brief: Mapping[str, str] | None = None) -> str:
+    """Convenience: template file + geometry + brief -> prompt text."""
+    template = Path(template)
+    if not template.is_file():
+        raise AigcError(f"prompt template not found: {template}")
+    variables: dict[str, object] = dict(geometry_variables(geom))
+    variables.update(brief or {})
+    return render(template.read_text(encoding="utf-8"), variables)
+
+
+def hash_prompt(text: str) -> str:
+    """Stable short hash, for the ledger's spend-once key."""
+    normalised = "\n".join(line.rstrip() for line in text.strip().splitlines())
+    return hashlib.sha256(normalised.encode("utf-8")).hexdigest()[:16]

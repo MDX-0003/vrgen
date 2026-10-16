@@ -1,8 +1,8 @@
 """job 管理：台账树的分组键 + prompt-vars 草稿。
 
 job 只是一个字符串键（调用方通常传 case 名），vrgen 不知道也不关心它的含义。
-这是从 vrpad ``aigc/case.py`` 里活下来的那一半灵魂："约定只说一次，每轮只传增量"；
-"去 vrpad 的 case 目录里自己找 *_pad.json"的那一半被砍掉，输入一律显式入参。
+轮次台账本体在 ``round/ledger.py``（← vrpad，战斗格式）；本模块只做 job 维度的
+分组（``runs/<job>/<轮次>/``）与提示词草稿。
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .errors import UsageError, VrgenError
-from .ledger import RESULT_MP4, RUN_JSON, RunRecord
+from .round.ledger import Run, RunStore
 
 PROMPT_VARS = "prompt-vars.toml"
 
@@ -103,62 +103,41 @@ def apply_set(pv: PromptVars, overrides: dict[str, str]) -> PromptVars:
     return merged
 
 
-# ── 轮次目录 ─────────────────────────────────────────────────────────────
+# ── 轮次（台账本体在 round/ledger.py，这里做 job 分组视图）───────────────
 
 
-def round_dir(workdir: str | Path | None, job: str, round_key: str) -> Path:
-    return job_dir(workdir, job) / round_key
+def store_for(workdir: str | Path | None, job: str) -> RunStore:
+    return RunStore(job_dir(workdir, job))
 
 
-def new_round_dir(workdir: str | Path | None, job: str, round_key: str) -> Path:
-    """创建轮次目录；已存在则原样返回（幂等——同内容的重复注册是同一轮）。"""
-    d = round_dir(workdir, job, round_key)
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+def list_rounds(workdir: str | Path | None, job: str) -> list[Run]:
+    """该 job 的全部轮次，按更新时间升序。"""
+    rounds = store_for(workdir, job).all()
+    rounds.sort(key=lambda r: (r.updated_utc or r.created_utc or "", r.key))
+    return rounds
 
 
-def list_rounds(workdir: str | Path | None, job: str) -> list[RunRecord]:
-    """按创建时间升序列出该 job 的全部轮次；坏台账跳过，不让它阻塞列表。"""
-    root = job_dir(workdir, job)
-    if not root.is_dir():
-        return []
-    records = []
-    for child in sorted(root.iterdir()):
-        if not child.is_dir() or not (child / RUN_JSON).is_file():
-            continue
-        try:
-            records.append(RunRecord.load(child))
-        except VrgenError:
-            continue
-    records.sort(key=lambda r: (r.created_utc, r.round))
-    return records
-
-
-def latest_usable_round(workdir: str | Path | None, job: str) -> RunRecord:
-    """gate != error 的最新一轮（ok 与 skipped 都算可用——skipped 只是没能验证，
-    不是验证失败）。没有可用轮时报错。"""
-    all_rounds = list_rounds(workdir, job)
-    usable = [r for r in all_rounds if r.gate.get("verdict") != "error"]
+def latest_usable_round(workdir: str | Path | None, job: str) -> Run:
+    """有结果文件且 gate != error 的最新一轮。"""
+    usable = [r for r in list_rounds(workdir, job)
+              if r.result and Path(r.result).is_file()
+              and (r.gate or {}).get("verdict") != "error"]
     if not usable:
-        root = job_dir(workdir, job)
         raise VrgenError(
-            f"job {job} 没有可用的轮次（台账根 {root}，"
-            f"共 {len(all_rounds)} 轮且全部 gate=error）"
+            f"job {job} 没有可用的轮次（台账根 {job_dir(workdir, job)}）"
         )
     return usable[-1]
 
 
-def find_round(workdir: str | Path | None, job: str, round_key: str) -> RunRecord:
-    d = round_dir(workdir, job, round_key)
-    if not (d / RUN_JSON).is_file():
-        raise UsageError(
-            f"job {job} 没有轮次 {round_key}（查可用轮次：vrgen status --job {job}）"
-        )
-    return RunRecord.load(d)
+def find_round(workdir: str | Path | None, job: str, round_key: str) -> Run:
+    try:
+        return store_for(workdir, job).open(round_key)
+    except VrgenError as exc:
+        raise UsageError(f"job {job}：{exc}") from exc
 
 
-def result_path(record: RunRecord, workdir: str | Path | None) -> Path:
-    p = round_dir(workdir, record.job, record.round) / RESULT_MP4
-    if not p.is_file():
-        raise VrgenError(f"{p} 缺失——台账在而结果文件不在，这轮废了")
+def result_path(run: Run) -> Path:
+    p = run.result_path
+    if p is None or not p.is_file():
+        raise VrgenError(f"{p or '(run.result 未记录)'} 缺失——台账在而结果文件不在，这轮废了")
     return p
