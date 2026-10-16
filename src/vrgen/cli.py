@@ -300,15 +300,18 @@ def status(
     except VrgenError as exc:
         _fail(exc)
     if not rounds:
-        typer.echo(f"job {job}: 还没有轮次（台账根 {jobs.job_dir(workdir, job)}）")
+        typer.echo(f"job {job}: 还没有 Session（记录根 {jobs.job_dir(workdir, job)}）")
         return
-    typer.echo(f"job {job}   ({len(rounds)} 轮，新→旧)")
+    typer.echo(f"job {job}   ({len(rounds)} 个 Session，新→旧)")
     for r in reversed(rounds):
         gate = (r.gate or {}).get("verdict", "?")
         backend = str(r.params.get("backend", "?"))
         mark = "*" if gate != "error" else "x"
+        # result=yes/no：这个 Session 有没有生成好的结果视频——调用方（web）
+        # 靠它预先判断"能不能选用"，而不是等 result 命令失败才知道
+        has_result = r.result_path is not None and r.result_path.is_file()
         typer.echo(f"  {mark} {r.dir.name:<22} {backend:<7} {r.stage:<10} "
-                   f"gate={gate:<8} {r.updated_utc}")
+                   f"gate={gate:<8} result={'yes' if has_result else 'no':<3} {r.updated_utc}")
 
 
 @app.command()

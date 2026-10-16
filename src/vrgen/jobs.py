@@ -138,6 +138,14 @@ def find_round(workdir: str | Path | None, job: str, round_key: str) -> Run:
 
 def result_path(run: Run) -> Path:
     p = run.result_path
-    if p is None or not p.is_file():
-        raise VrgenError(f"{p or '(run.result 未记录)'} 缺失——台账在而结果文件不在，这轮废了")
+    if p is None:
+        # 从未生成过结果（提交失败/中断，只留下了过程记录）。
+        # 字段名（run.result）级别的细节降级到这行注释，终端只留人话与下一步。
+        raise VrgenError(
+            f"Session {run.dir.name} 没有生成过结果视频（当时提交失败或中断，"
+            f"只留下了过程记录），无法被后续流程使用；请换一个 Session，或重新提交生成")
+    if not p.is_file():
+        raise VrgenError(
+            f"Session {run.dir.name} 记录的结果视频不在了：{p}"
+            f"（可能被手动移动或删除）；请换一个 Session，或重新提交生成")
     return p
