@@ -1,0 +1,17 @@
+# 数据不进 git（AGENTS.md 硬规则 7）
+runs/
+templates/*.local.md
+logs/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# 机器本地配置覆盖（默认值在 config/default.toml）
+vrgen.toml
+
+# 系统
+Thumbs.db
