@@ -213,8 +213,9 @@ class RunStore:
             if (child / RUN_FILE).is_file():
                 try:
                     runs.append(Run.load(child))
-                except (LedgerError, json.JSONDecodeError, TypeError):
-                    continue
+                except (LedgerError, json.JSONDecodeError, TypeError,
+                        KeyError, ValueError):
+                    continue          # 坏/旧格式台账不阻塞列举，但也不假装它存在
         return runs
 
     def summary(self, limit: int = 6) -> list[str]:
