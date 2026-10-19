@@ -156,15 +156,20 @@ def parse_models(items: Iterable[Mapping[str, Any]]) -> list[ModelInfo]:
 
 
 def find_model(models: Sequence[ModelInfo], code: int) -> ModelInfo:
-    for model in models:
-        if model.code == int(code):
-            return model
-    raise AigcError(
-        f"model id {code} is not in the platform's model list "
-        f"(have: {', '.join(str(m.code) for m in models)}).\n"
-        f"  set aigc.model_id in config/; code 37 is Seedance 2.5, the only model with "
-        f"the structurally locked `videoEdit` mode this tool needs"
-    )
+    matches = [m for m in models if m.code == int(code)]
+    if not matches:
+        raise AigcError(
+            f"model id {code} is not in the platform's model list "
+            f"(have: {', '.join(str(m.code) for m in models)}).\n"
+            f"  set aigc.model_id in config/; code 37 is Seedance 2.5, the only model with "
+            f"the structurally locked `videoEdit` mode this tool needs"
+        )
+    # The platform lists some models twice: a cheaper "sample" entry and the full
+    # one under the same code (37 is the current example; the sample entry only
+    # advertises 480p). Pick the entry with the most capabilities so resolution
+    # tiers and limits come from the full model, not the sample UI variant.
+    return max(matches, key=lambda m: (
+        len(m.modes), sum(len(mode.resolutions) for mode in m.modes.values())))
 
 
 def fetch_items(url: str = MODEL_LIST_URL, timeout: float = 60.0) -> list[dict]:

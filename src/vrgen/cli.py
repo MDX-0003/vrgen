@@ -19,6 +19,9 @@ from . import config as config_mod
 from .errors import TaskFailed, UsageError, VrgenError
 from .paths import templates_dir
 from .platform.client import Mglc
+from .platform.media import probe_input
+from .platform.models import find_model, load_models
+from .prep import params as params_mod
 from .progress import Log
 from .round.ledger import PROGRESS_LOG, RunStore, append_call_log, shell_line
 from .round.pipeline import InputPackage, execute_round, prepare_round
@@ -48,6 +51,50 @@ def _root(
 
 
 # ── mglc 后端：submit ────────────────────────────────────────────────────
+
+
+def _apply_generation_params(conf, workdir, job, *, model_id, mode, resolution,
+                             duration, num, aspect_ratio, scale) -> None:
+    """Resolve submit parameters: CLI > generation.toml > config.
+
+    Every option except ``scale`` maps one-to-one onto a ``mglc video generate``
+    flag (``--mode`` is mglc ``--type``). ``scale`` is vrgen's own upload
+    decision and has no mglc counterpart; it changes the prompt geometry.
+    """
+    saved = jobs.load_generation_params(workdir, job)
+    picks = {
+        "model_id": model_id,
+        "mode": mode,
+        "resolution": resolution if resolution is not None else saved.resolution,
+        "duration_s": duration,
+        "num": num,
+        "aspect_ratio": aspect_ratio,
+        "scale": scale if scale is not None else saved.scale,
+    }
+    for key, value in picks.items():
+        if value is not None:
+            conf.data["mglc"][key] = value
+
+    if int(conf.get("mglc.model_id")) < 1:
+        raise UsageError("--model-id 必须是平台模型 ID（fullredraw 用 37）")
+    if not str(conf.get("mglc.mode")).strip():
+        raise UsageError("--mode 不能为空（fullredraw 用 videoEdit）")
+    # CLI/草稿只接受页面上的三档；config 里仍可保留 quarter/WxH 供内部调试。
+    if resolution is not None and resolution not in params_mod.OUTPUT_TIERS:
+        raise UsageError("--resolution 只能是 480p | 720p | 1080p")
+    if saved.resolution is not None and saved.resolution not in params_mod.OUTPUT_TIERS:
+        raise UsageError(f"generation.toml: resolution {saved.resolution!r} 不合法")
+    duration_s = int(conf.get("mglc.duration_s"))
+    if duration_s < 0 or 0 < duration_s < 4:
+        raise UsageError("--duration 必须 >= 4（0 表示按输入时长自动取整）")
+    if not 1 <= int(conf.get("mglc.num")) <= 4:
+        raise UsageError("--num 必须在 1..4")
+    if ":" not in str(conf.get("mglc.aspect_ratio")):
+        raise UsageError("--aspect-ratio 必须是 W:H（如 21:9）")
+    if scale is not None and scale not in params_mod.INPUT_MODES:
+        raise UsageError("--scale 只能是 auto | full | half")
+    if saved.scale is not None and saved.scale not in params_mod.INPUT_MODES:
+        raise UsageError(f"generation.toml: scale {saved.scale!r} 不合法")
 
 
 def _parse_kv(items: list[str] | None) -> dict[str, str]:
@@ -86,8 +133,20 @@ def submit(
         None, "--template", help="模板 id；首次指定后记入 prompt-vars 草稿。"),
     sets: list[str] = typer.Option(None, "--set",
                                     help="提示词变量 k=v（自适应于草稿 [vars]）。"),
+    model_id: int = typer.Option(None, "--model-id",
+                                 help="← mglc --model-id；fullredraw 固定 37。"),
+    mode: str = typer.Option(None, "--mode",
+                             help="← mglc --type；fullredraw 固定 videoEdit。"),
     resolution: str = typer.Option(None, "--resolution",
-                                    help="覆盖 mglc.resolution。"),
+                                    help="← mglc --resolution；输出档位 480p|720p|1080p。"),
+    duration: int = typer.Option(None, "--duration",
+                                 help="← mglc --duration；整数秒，默认按输入时长取整。"),
+    num: int = typer.Option(None, "--num",
+                            help="← mglc --num；1..4（当前只取第一个结果）。"),
+    aspect_ratio: str = typer.Option(None, "--aspect-ratio",
+                                      help="← mglc --aspect-ratio；fullredraw 固定 21:9。"),
+    scale: str = typer.Option(None, "--scale",
+                              help="vrgen 自有上传缩放：auto|full|half（无 mglc 对应 flag）。"),
     dry_run: bool = typer.Option(False, "--dry-run",
                                   help="只做本地半场（缩档+提示词+台账），不发请求不花钱。"),
     workdir: Path = typer.Option(None, "--workdir",
@@ -98,8 +157,11 @@ def submit(
     log = Log()
     try:
         conf = config_mod.load(config)
-        if resolution:
-            conf.data["mglc"]["resolution"] = resolution
+        _apply_generation_params(
+            conf, workdir, job, model_id=model_id, mode=mode,
+            resolution=resolution, duration=duration, num=num,
+            aspect_ratio=aspect_ratio, scale=scale,
+        )
         canvas_size = _parse_wh(canvas, "--canvas")
         source_size = _parse_wh(source, "--source")
 
@@ -319,6 +381,93 @@ def prompt_save(
     except VrgenError as exc:
         _fail(exc)
     _echo_payload(payload)
+
+
+# ── 生成参数草稿（web 生成页的数据源，决策 20）─────────────────────────
+
+params_app = typer.Typer(
+    help="生成参数草稿：show 读输出/输入分辨率选项，save 写 generation.toml；JSON 输出。",
+    no_args_is_help=True,
+)
+app.add_typer(params_app, name="params")
+
+
+@params_app.command("show")
+def params_show(
+    job: str = typer.Option(..., "--job", help="job 名（调用方通常传 case 名）。"),
+    input: Path = typer.Option(..., "--input", exists=True, dir_okay=False,
+                               help="送生成的视频（用于计算 auto 输入尺寸）。"),
+    canvas: str = typer.Option(..., "--canvas", help="画布尺寸 WxH。"),
+    source: str = typer.Option(..., "--source", help="源尺寸 WxH（冗余带宽度来源）。"),
+    config: Path = typer.Option(None, "--config", help="TOML 配置文件。"),
+    workdir: Path = typer.Option(None, "--workdir", help="台账根（默认 $VRGEN_RUNS_DIR）。"),
+) -> None:
+    """输出分辨率档位 + 输入缩放档位的实际宽高，以及当前草稿/固定参数。"""
+    try:
+        conf = config_mod.load(config)
+        _apply_generation_params(
+            conf, workdir, job, model_id=None, mode=None, resolution=None,
+            duration=None, num=None, aspect_ratio=None, scale=None,
+        )
+        canvas_size = _parse_wh(canvas, "--canvas")
+        _parse_wh(source, "--source")
+        models = load_models(jobs.job_dir(workdir, job),
+                             url=str(conf.get("mglc.model_list_url")),
+                             max_age_h=float(conf.get("mglc.models_max_age_h", 24.0)),
+                             log=Log(quiet=True))
+        model = find_model(models, int(conf.get("mglc.model_id")))
+        limits = model.mode(str(conf.get("mglc.mode")))
+        if not limits.takes_video:
+            raise UsageError(f"model {model.code} mode {limits.mode} 不接受输入视频")
+        spec = probe_input(input, conf)
+        duration_s = int(conf.get("mglc.duration_s")) or params_mod.derived_duration(spec)
+        outputs = params_mod.output_options(canvas_size[0] / canvas_size[1])
+        if limits.resolutions:
+            outputs = [o for o in outputs if o["value"] in limits.resolutions]
+        payload = {
+            "job": job,
+            "output": outputs,
+            "input": params_mod.input_options(canvas_size, spec,
+                                              limits.ref_video_limits()),
+            "current": {
+                "resolution": str(conf.get("mglc.resolution")),
+                "scale": str(conf.get("mglc.scale")),
+            },
+            "fixed": {
+                "model_id": model.code,
+                "mode": limits.mode,
+                "aspect_ratio": str(conf.get("mglc.aspect_ratio")),
+                "duration_s": duration_s,
+                "num": int(conf.get("mglc.num", 1)),
+            },
+            "saved": jobs.generation_params_path(workdir, job).is_file(),
+        }
+    except VrgenError as exc:
+        _fail(exc)
+    _echo_payload(payload)
+
+
+@params_app.command("save")
+def params_save(
+    job: str = typer.Option(..., "--job", help="job 名（调用方通常传 case 名）。"),
+    resolution: str = typer.Option(..., "--resolution",
+                                   help="输出档位：480p | 720p | 1080p。"),
+    scale: str = typer.Option(..., "--scale",
+                              help="输入缩放：auto | full | half。"),
+    workdir: Path = typer.Option(None, "--workdir", help="台账根（默认 $VRGEN_RUNS_DIR）。"),
+) -> None:
+    """保存 job 级生成参数草稿（写 runs/<job>/generation.toml）。"""
+    try:
+        if resolution not in params_mod.OUTPUT_TIERS:
+            raise UsageError("resolution 只能是 480p | 720p | 1080p")
+        if scale not in params_mod.INPUT_MODES:
+            raise UsageError("scale 只能是 auto | full | half")
+        jobs.save_generation_params(
+            workdir, job,
+            jobs.GenerationParams(resolution=resolution, scale=scale))
+    except VrgenError as exc:
+        _fail(exc)
+    _echo_payload({"resolution": resolution, "scale": scale})
 
 
 # ── manual 后端（M3）─────────────────────────────────────────────────────

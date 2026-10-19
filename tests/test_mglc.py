@@ -177,6 +177,20 @@ def test_model_list_parses_the_seedance_shape():
     assert model.mode("firstFrame").takes_video is False
 
 
+def test_find_model_prefers_the_full_entry_over_the_sample_variant():
+    def raw(name, resolutions):
+        return {"code": 37, "displayName": name, "modelConfig": {
+            "referenceModes": [{"mode": "videoEdit", "supportVirtualIp": True,
+                                "resolutions": resolutions,
+                                "refVideoValidator": V25_VIDEOEDIT}]}}
+
+    models = parse_models([raw("Seedance 2.5（样片模式）", ["480p"]),
+                           raw("Seedance 2.5", ["480p", "720p", "1080p"])])
+    model = find_model(models, 37)
+    assert model.name == "Seedance 2.5"
+    assert model.mode("videoEdit").resolutions == ("480p", "720p", "1080p")
+
+
 def test_model_cache_is_used_and_refreshed(tmp_path):
     calls: list[str] = []
 
@@ -627,3 +641,34 @@ def test_cli_dry_run_reads_scale_from_config(tmp_path, monkeypatch):
         "--config", str(cfg)])
     assert result.exit_code == 0, result.output
     assert "2334x1000" in result.output
+
+
+def test_cli_submit_explicit_params_override_config(tmp_path, monkeypatch):
+    video, mask = _offline(monkeypatch, tmp_path)
+    runs = tmp_path / "runs"
+    _model_cache(runs / "j")
+    from vrgen import jobs as vrgen_jobs
+    vrgen_jobs.save_prompt_vars(runs, "j", vrgen_jobs.PromptVars(vars={"theme": "黄昏"}))
+    monkeypatch.setenv("VRGEN_MGLC_BIN", str(tmp_path / "definitely-absent.exe"))
+    import vrgen.platform.binpath as binpath
+    monkeypatch.setattr(binpath.shutil, "which", lambda name: None)
+    cfg = tmp_path / "vrgen.toml"
+    cfg.write_text('[mglc]\nresolution = "480p"\nscale = "auto"\n', encoding="utf-8")
+
+    result = CliRunner().invoke(vrgen_cli.app, [
+        "submit", "--job", "j", "--input", str(video), "--mask", str(mask),
+        "--canvas", "4668x2000", "--source", "4000x2000",
+        "--template", "t", "--dry-run", "--workdir", str(runs),
+        "--config", str(cfg),
+        "--model-id", "37", "--mode", "videoEdit", "--resolution", "720p",
+        "--duration", "9", "--num", "1", "--aspect-ratio", "21:9",
+        "--scale", "half"])
+    assert result.exit_code == 0, result.output
+    run = RunStore(runs / "j").all()[0]
+    assert run.params["resolution"] == "720p"
+    assert run.params["scale"] == "2334x1000"
+    assert run.params["duration_s"] == 9
+    assert run.params["model_id"] == 37
+    assert run.params["mode"] == "videoEdit"
+    assert run.params["aspect_ratio"] == "21:9"
+

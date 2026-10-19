@@ -7,13 +7,15 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
+from vrgen import cli as vrgen_cli
 from vrgen import jobs
 from vrgen.cli import app
+from vrgen.prep.budget import InputSpec
 
 runner = CliRunner()
 
 REAL_COMMANDS = {"register", "status", "result", "submit", "login", "models",
-                 "peek", "prompt"}
+                 "peek", "prompt", "params"}
 
 
 def test_help_lists_the_contract_surface():
@@ -88,6 +90,10 @@ def test_prompt_show_defaults_and_placeholders(tmp_path):
     assert data["template"] == "360-closure"        # 配置默认兜底
     assert data["vars"] == {}                       # 还没有草稿
     assert "theme" in data["placeholders"] and "style" in data["placeholders"]
+    for key in ("plot", "action", "allowed_changes"):
+        assert key in data["placeholders"]
+    assert "【情节与动作】" in data["template_text"]
+    assert "【允许变化】" in data["template_text"]
     assert "{canvas_w}" in data["template_text"]
     assert "canvas_w" in data["geometry_keys"] and "canvas_w" not in data["vars"]
     assert "360-closure" in data["available"]
@@ -128,3 +134,103 @@ def test_prompt_save_rejects_unknown_template(tmp_path):
                             "--workdir", str(tmp_path)])
     assert r.exit_code == 2 and "不存在" in r.output
     assert not jobs.prompt_vars_path(tmp_path, "j1").is_file()   # 失败不落盘
+
+
+# ── params show / save（决策 20，契约 case-model.md §4）───────────────────
+
+
+class _Limits:
+    mode = "videoEdit"
+    takes_video = True
+    resolutions = ("480p", "720p", "1080p")
+
+    def ref_video_limits(self):
+        return {"minPixel": 409_600, "maxPixel": 8_295_044,
+                "maxBytes": 209_715_200,
+                "fps": {"min": 24, "max": 60},
+                "duration": {"min": 2, "max": 30},
+                "formats": ["mp4"],
+                "refVideoMinAspectRatio": 0.4,
+                "refVideoMaxAspectRatio": 2.5}
+
+
+class _Model:
+    code = 37
+
+    def mode(self, name):
+        return _Limits()
+
+
+def _params_offline(tmp_path, monkeypatch):
+    input = tmp_path / "in.mp4"
+    input.write_bytes(b"fake")
+    monkeypatch.setattr(vrgen_cli, "load_models", lambda *a, **kw: [_Model()])
+    monkeypatch.setattr(vrgen_cli, "find_model", lambda models, code: _Model())
+    monkeypatch.setattr(vrgen_cli, "probe_input", lambda path, conf: InputSpec(
+        width=4668, height=2000, fps=30.0, duration_s=7.979,
+        size_bytes=228_200_000, container=("mp4",)))
+    return input
+
+
+def test_params_show_reports_both_resolution_kinds(tmp_path, monkeypatch):
+    input = _params_offline(tmp_path, monkeypatch)
+    r = runner.invoke(app, ["params", "show", "--job", "j1",
+                            "--input", str(input), "--canvas", "4668x2000",
+                            "--source", "4000x2000", "--workdir", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    data = json.loads(r.output)
+    assert data["output"][1] == {"value": "720p", "width": 1470, "height": 630}
+    sizes = {o["value"]: (o["width"], o["height"], o["ok"]) for o in data["input"]}
+    assert sizes["auto"] == (4400, 1884, True)
+    assert sizes["full"] == (4668, 2000, False)       # 像素和体积都超限
+    assert sizes["half"] == (2334, 1000, True)
+    assert data["current"] == {"resolution": "1080p", "scale": "auto"}
+    assert data["fixed"]["duration_s"] == 8
+    assert data["saved"] is False
+
+
+def test_params_save_roundtrips_through_show(tmp_path, monkeypatch):
+    input = _params_offline(tmp_path, monkeypatch)
+    wd = str(tmp_path)
+    r = runner.invoke(app, ["params", "save", "--job", "j1",
+                            "--resolution", "720p", "--scale", "half",
+                            "--workdir", wd])
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output) == {"resolution": "720p", "scale": "half"}
+    assert jobs.generation_params_path(tmp_path, "j1").is_file()
+
+    r = runner.invoke(app, ["params", "show", "--job", "j1",
+                            "--input", str(input), "--canvas", "4668x2000",
+                            "--source", "4000x2000", "--workdir", wd])
+    data = json.loads(r.output)
+    assert data["current"] == {"resolution": "720p", "scale": "half"}
+    assert data["saved"] is True
+
+
+def test_params_save_rejects_values_outside_the_ui_set(tmp_path):
+    for args in (["--resolution", "4K", "--scale", "auto"],
+                 ["--resolution", "720p", "--scale", "quarter"]):
+        r = runner.invoke(app, ["params", "save", "--job", "j1", *args,
+                                "--workdir", str(tmp_path)])
+        assert r.exit_code == 2, r.output
+
+
+def test_360_template_renders_plot_and_allowed_changes():
+    from vrgen.paths import templates_dir
+    from vrgen.prep.prompt import geometry_variables, render
+    from vrgen.prep.scale import scaled_geometry
+
+    template = (templates_dir() / "360-closure.md").read_text(encoding="utf-8")
+    geom = scaled_geometry((4668, 2000), (4000, 2000), (4400, 1884))
+    text = render(template, {
+        **geometry_variables(geom),
+        "theme": "黄昏下的木质帆船", "style": "电影级写实",
+        "plot": "帆船沿原航向前进", "action": "船帆随风轻微摆动",
+        "allowed_changes": "无。",
+    })
+    assert "输入文件为 4400×1884" in text
+    assert "【情节与动作】" in text and "帆船沿原航向前进" in text
+    assert "【允许变化】" in text and "无。" in text
+    assert "输出像素尺寸由平台分辨率档决定" in text
+
+
