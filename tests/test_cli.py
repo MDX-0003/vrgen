@@ -274,7 +274,8 @@ def test_params_show_aspect_auto_is_reported_for_gen(tmp_path, monkeypatch):
 def test_gen_edit_template_is_available_and_needs_its_variables():
     from vrgen.paths import templates_dir
     text = (templates_dir() / "gen-edit.md").read_text(encoding="utf-8")
-    for key in ("subject", "target", "plot", "preserve", "allowed_changes"):
+    for key in ("subject", "target", "plot", "motion_rule", "preserve",
+                "allowed_changes"):
         assert "{" + key + "}" in text
     assert "{theme}" not in text
 
