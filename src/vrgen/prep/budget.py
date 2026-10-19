@@ -118,6 +118,87 @@ def suggest_size(spec: InputSpec, max_pixels: int, max_bytes: int = 0,
     return width, height
 
 
+def _int_limit(validator: Mapping[str, object], *names: str) -> int:
+    for name in names:
+        value = validator.get(name)
+        try:
+            if value is not None:
+                return int(value)
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _float_limit(validator: Mapping[str, object], *names: str) -> float:
+    for name in names:
+        value = validator.get(name)
+        try:
+            if value is not None:
+                return float(value)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def check_image(spec: InputSpec, validator: Mapping[str, object]) -> BudgetReport:
+    """Compare a reference image against ``refImageValidator``.
+
+    Images have no fps/duration; the checks are sides, pixels, aspect, formats
+    and bytes. Field names are read tolerantly because the public model list
+    only documents the semantics ("边长 300–6000", "宽高比 0.4–2.5").
+    """
+    checks: list[Check] = []
+    min_w = _int_limit(validator, "minWidth", "minSide")
+    max_w = _int_limit(validator, "maxWidth", "maxSide")
+    min_h = _int_limit(validator, "minHeight", "minSide")
+    max_h = _int_limit(validator, "maxHeight", "maxSide")
+    if min_w or max_w:
+        checks.append(Check("width", min_w <= spec.width <= (max_w or 10**9),
+                            f"{spec.width}, allowed {min_w}..{max_w or '∞'}"))
+    if min_h or max_h:
+        checks.append(Check("height", min_h <= spec.height <= (max_h or 10**9),
+                            f"{spec.height}, allowed {min_h}..{max_h or '∞'}"))
+    min_px = _int_limit(validator, "minPixel")
+    max_px = _int_limit(validator, "maxPixel")
+    if min_px or max_px:
+        checks.append(Check("pixels", min_px <= spec.pixels <= (max_px or 10**12),
+                            f"{spec.pixels:,} px, budget {min_px:,}..{max_px or '∞'}"))
+    formats = tuple(str(f).lower() for f in (validator.get("formats") or ()))
+    if formats:
+        hit = any(f in spec.container for f in formats)
+        checks.append(Check("container", hit, f"{list(spec.container)} vs {list(formats)}"))
+    max_bytes = _int_limit(validator, "maxBytes")
+    if max_bytes:
+        checks.append(Check("size", spec.size_bytes <= max_bytes,
+                            f"{spec.size_bytes / 1e6:.1f} MB, max {max_bytes / 1e6:.0f} MB"))
+    lo = _float_limit(validator, "minAspectRatio", "refImageMinAspectRatio")
+    hi = _float_limit(validator, "maxAspectRatio", "refImageMaxAspectRatio") or 1e9
+    if lo or hi < 1e9:
+        checks.append(Check("aspect", lo <= spec.aspect <= hi,
+                            f"{spec.aspect:.4f}, allowed {lo:g}..{hi:g}"))
+    return BudgetReport(spec=spec, checks=tuple(checks), limits=validator)
+
+
+def fit_image_size(spec: InputSpec, validator: Mapping[str, object]) -> tuple[int, int]:
+    """Largest size that clears the image caps while keeping the aspect ratio."""
+    width, height = spec.width, spec.height
+    max_px = _int_limit(validator, "maxPixel")
+    max_bytes = _int_limit(validator, "maxBytes")
+    max_w = _int_limit(validator, "maxWidth", "maxSide")
+    max_h = _int_limit(validator, "maxHeight", "maxSide")
+    factors: list[float] = []
+    if max_px and spec.pixels > max_px:
+        factors.append((max_px / spec.pixels) ** 0.5)
+    if max_bytes and spec.size_bytes > max_bytes:
+        factors.append((max_bytes / spec.size_bytes) ** 0.5)
+    if max_w and width > max_w:
+        factors.append(max_w / width)
+    if max_h and height > max_h:
+        factors.append(max_h / height)
+    factor = min(factors) if factors else 1.0
+    return max(2, int(width * factor)), max(2, int(height * factor))
+
+
 def check_input(spec: InputSpec, validator: Mapping[str, object]) -> BudgetReport:
     """Compare ``spec`` against one ``refVideoValidator`` block from the model list."""
     checks: list[Check] = []

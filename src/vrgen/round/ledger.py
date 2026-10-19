@@ -98,13 +98,19 @@ class Run:
 
 
 def run_key(prompt: str, upload: str | Path, mask: str | Path | None = None,
-            params: Mapping[str, Any] | None = None) -> str:
-    """Spend-once key: identical prompt + identical inputs + identical parameters."""
+            params: Mapping[str, Any] | None = None,
+            extra: Mapping[str, Any] | None = None) -> str:
+    """Spend-once key: identical prompt + identical inputs + identical parameters.
+
+    ``extra`` carries the gen multi-asset fingerprints (one hash per upload) so two
+    rounds that differ only in a secondary video cannot collide.
+    """
     blob = {
         "prompt": hash_prompt(prompt),
         "upload": sha256_16(upload),
         "mask": sha256_16(mask) if mask else None,
         "params": {str(k): params[k] for k in sorted(params or {})},
+        "extra": dict(extra or {}),
     }
     canonical = json.dumps(blob, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

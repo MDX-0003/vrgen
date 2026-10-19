@@ -22,8 +22,14 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 
+from ..refs import MODE_ROLES, SUPPORTED_MODES
 from .budget import InputSpec, check_input, even_down
 from .scale import choose_upload_size
+
+__all__ = [
+    "INPUT_MODES", "MODE_LABELS", "MODE_ROLES", "OUTPUT_TIERS", "SUPPORTED_MODES",
+    "derived_duration", "effective_aspect", "input_options", "output_options",
+]
 
 INPUT_MODES = ("auto", "full", "half")
 OUTPUT_TIERS = ("480p", "720p", "1080p")

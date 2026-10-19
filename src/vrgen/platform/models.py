@@ -53,10 +53,21 @@ class ModeLimits:
     def takes_video(self) -> bool:
         return self.ref_video is not None
 
+    @property
+    def max_videos(self) -> int:
+        return _cap(self.ref_video, self.max_count)
+
+    @property
+    def max_images(self) -> int:
+        return _cap(self.ref_image, self.max_count)
+
     def ref_video_limits(self) -> Mapping[str, Any]:
         if self.ref_video is None:
             raise AigcError(f"mode {self.mode!r} does not accept an input video")
         return self.ref_video
+
+    def ref_image_limits(self) -> Mapping[str, Any]:
+        return self.ref_image or {}
 
     def describe(self) -> str:
         dur = self.duration or {}
@@ -65,6 +76,13 @@ class ModeLimits:
         return (f"{self.mode}: video={'yes' if self.takes_video else 'no'}"
                 f" (max {self.max_count})  asset_id={'required' if self.support_virtual_ip else 'not used'}"
                 f"  {span}  {list(self.resolutions)}")
+
+
+def _cap(validator: Mapping[str, Any] | None, mode_max: int) -> int:
+    """Reference-count cap: the tighter of the validator's and the mode's own."""
+    caps = [int(value) for value in (
+        (validator or {}).get("maxCount") or 0, mode_max or 0) if int(value) > 0]
+    return min(caps) if caps else 0
 
 
 @dataclass(frozen=True)

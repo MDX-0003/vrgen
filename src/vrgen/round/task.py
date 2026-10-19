@@ -40,13 +40,23 @@ _WM_MARKERS = ("wm", "watermark", "watermarked")
 
 def build_generate_argv(*, prompt: str, model_id: int, mode: str, duration_s: int,
                         resolution: str, aspect_ratio: str, num: int,
-                        upload: str | Path, mask: str | Path | None = None,
+                        upload: str | Path | None = None,
+                        mask: str | Path | None = None,
                         video_asset_id: int | None = None,
                         image_asset_id: int | None = None,
+                        videos: list[tuple[str | Path, int | None]] | None = None,
+                        images: list[tuple[str | Path, int | None]] | None = None,
                         session_id: int | None = None,
                         keep_sound: bool = True,
                         preview: bool = False) -> list[str]:
     """The ``mglc video generate`` arguments for one round.
+
+    Two input shapes share this builder:
+
+    * ``upload`` / ``mask`` + ``*_asset_id`` -- the patch/fullredraw single-video
+      path, kept for compatibility;
+    * ``videos`` / ``images`` -- gen multi-asset lists, each ``(path, asset_id)``
+      in prompt order. The first video is the master.
 
     ``--duration`` is passed even for an editing task, where the platform reports
     ``duration.type = ""`` (i.e. the timeline is the input's): the CLI marks the flag
@@ -64,35 +74,44 @@ def build_generate_argv(*, prompt: str, model_id: int, mode: str, duration_s: in
     by the service, and finding that out from a human reading the command is cheaper
     than finding out from a failed task.
     """
+    if videos is None:
+        videos = [(upload, video_asset_id)] if upload is not None else []
+    if images is None:
+        images = [(mask, image_asset_id)] if mask is not None else []
+    if not videos:
+        raise AigcError("a generation round needs at least one reference video")
+
     argv = ["--prompt", prompt,
             "--model-id", str(int(model_id)),
             "--type", str(mode),
             "--duration", str(int(duration_s)),
             "--resolution", str(resolution),
-            "--num", str(int(num)),
-            "--video", str(upload)]
+            "--num", str(int(num))]
     # videoEdit 的输出比例跟随输入（模型详情里 ratios 为空）；"auto" 表示不传该 flag。
     if str(aspect_ratio).strip().lower() != "auto":
         argv += ["--aspect-ratio", str(aspect_ratio)]
     if keep_sound:
         argv.append("--keep-original-sound")
-    if video_asset_id is None:
-        if not preview:
-            raise AigcError("Seedance requires a matching SD-compliance asset id for the "
-                            "reference video; run `vrpad aigc assets` first")
-        video_asset_id = "<video-asset-id>"
-    argv += ["--video-asset-id", str(video_asset_id)]
+    for path, asset_id in videos:
+        argv += ["--video", str(path)]
+        if asset_id is None:
+            if not preview:
+                raise AigcError("Seedance requires a matching SD-compliance asset id for "
+                                "every reference video; run `vrgen submit` again after the "
+                                "asset step")
+            asset_id = "<video-asset-id>"
+        argv += ["--video-asset-id", str(asset_id)]
     if session_id:
         # 项目生成会话：平台的计费上下文跟随会话，额度走项目而不是个人。
         argv += ["--session-id", str(int(session_id))]
-    if mask is not None:
-        argv += ["--image", str(mask)]
-        if image_asset_id is None:
+    for path, asset_id in images:
+        argv += ["--image", str(path)]
+        if asset_id is None:
             if not preview:
-                raise AigcError("the reference image (mask) also needs an asset id for "
-                                "Seedance; run `vrpad aigc assets` first")
-            image_asset_id = "<image-asset-id>"
-        argv += ["--asset-id", str(image_asset_id)]
+                raise AigcError("the reference image also needs an asset id for Seedance; "
+                                "run `vrgen submit` again after the asset step")
+            asset_id = "<image-asset-id>"
+        argv += ["--asset-id", str(asset_id)]
     return argv
 
 
@@ -130,22 +149,42 @@ def submit(client: Mglc, run: Run, *, confirm: bool = False, timeout: float = 30
     assert_spendable(run)
     upload = run.upload.get("path")
     if not upload:
-        raise AigcError(f"run {run.key} has no prepared upload; run `vrpad aigc prepare`")
-    argv = build_generate_argv(
-        prompt=run.prompt,
-        model_id=int(run.params["model_id"]),
-        mode=str(run.params["mode"]),
-        duration_s=int(run.params["duration_s"]),
-        resolution=str(run.params["resolution"]),
-        aspect_ratio=str(run.params["aspect_ratio"]),
-        num=int(run.params.get("num", 1)),
-        upload=upload,
-        mask=(run.mask or {}).get("path"),
-        video_asset_id=run.assets.get("video"),
-        image_asset_id=run.assets.get("image"),
-        keep_sound=bool(run.params.get("keep_sound", True)),
-        session_id=int(run.params.get("session_id", 0) or 0),
-    )
+        raise AigcError(f"run {run.key} has no prepared upload; run `vrgen submit` again")
+    refs = run.params.get("refs") or []
+    if refs:
+        videos = [(str(item["upload"]), run.assets.get(f"video:{item['id']}"))
+                  for item in refs if item.get("kind") == "video"]
+        images = [(str(item["upload"]), run.assets.get(f"image:{item['id']}"))
+                  for item in refs if item.get("kind") == "image"]
+        argv = build_generate_argv(
+            prompt=run.prompt,
+            model_id=int(run.params["model_id"]),
+            mode=str(run.params["mode"]),
+            duration_s=int(run.params["duration_s"]),
+            resolution=str(run.params["resolution"]),
+            aspect_ratio=str(run.params["aspect_ratio"]),
+            num=int(run.params.get("num", 1)),
+            videos=videos,
+            images=images,
+            keep_sound=bool(run.params.get("keep_sound", True)),
+            session_id=int(run.params.get("session_id", 0) or 0),
+        )
+    else:
+        argv = build_generate_argv(
+            prompt=run.prompt,
+            model_id=int(run.params["model_id"]),
+            mode=str(run.params["mode"]),
+            duration_s=int(run.params["duration_s"]),
+            resolution=str(run.params["resolution"]),
+            aspect_ratio=str(run.params["aspect_ratio"]),
+            num=int(run.params.get("num", 1)),
+            upload=upload,
+            mask=(run.mask or {}).get("path"),
+            video_asset_id=run.assets.get("video"),
+            image_asset_id=run.assets.get("image"),
+            keep_sound=bool(run.params.get("keep_sound", True)),
+            session_id=int(run.params.get("session_id", 0) or 0),
+        )
     write_command(run, [client.exe(), "video", "generate", *argv], spend=True)
     if log is not None:
         log.step("submitting (this spends quota)")

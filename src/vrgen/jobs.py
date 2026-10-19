@@ -21,6 +21,10 @@ from .round.ledger import Run, RunStore
 
 PROMPT_VARS = "prompt-vars.toml"
 
+#: 模板占位里由素材与模式在 submit 时计算的只读键（决策 25）。它们不属于
+#: ``--set`` 的草稿变量，也不允许写进 prompt-vars.toml。
+COMPUTED_KEYS = ("asset_list", "task_rule", "timeline_rule")
+
 #: job 名只允许这组字符：它是台账树的目录名，不能让它逃出 workdir。
 _JOB_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -206,6 +210,7 @@ def prompt_overview(workdir, job, template: str | None = None,
         "template_text": None,
         "placeholders": [],
         "geometry_keys": [],
+        "computed_keys": [],
         "vars": pv.vars,
     }
     if resolved:
@@ -213,7 +218,8 @@ def prompt_overview(workdir, job, template: str | None = None,
         placeholders = template_placeholders(text)
         overview.update(template_text=text,
                         placeholders=placeholders,
-                        geometry_keys=[k for k in placeholders if k in GEOMETRY_KEYS])
+                        geometry_keys=[k for k in placeholders if k in GEOMETRY_KEYS],
+                        computed_keys=[k for k in placeholders if k in COMPUTED_KEYS])
     return overview
 
 
@@ -227,6 +233,9 @@ def edit_prompt_vars(workdir, job, sets: dict[str, str] | None = None,
     """
     pv = load_prompt_vars(workdir, job)
     resolved = _resolve_template(template, pv, config_default)
+    computed = sorted(set(COMPUTED_KEYS) & set(sets or {}))
+    if computed:
+        raise UsageError(f"变量 {computed} 由素材与模式自动生成，不能写入草稿")
     if unsets and resolved:
         protected = set(template_placeholders(
             (templates_dir() / f"{resolved}.md").read_text(encoding="utf-8")))

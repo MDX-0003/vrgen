@@ -103,6 +103,29 @@ def choose_upload_size(canvas_size: tuple[int, int], *, mode: str = "auto",
     return suggest_size(probe, max_pixels, max_bytes)
 
 
+def plain_geometry(canvas_size: tuple[int, int],
+                   upload_size: tuple[int, int]) -> UploadGeometry:
+    """Geometry for a non-panorama source: no redundant band, canvas == source.
+
+    ``scaled_geometry`` exists for the fullredraw canvas, where
+    ``canvas_w - source_w`` is a real band. gen has no band; using that function
+    there would invent a 2-pixel band and print misleading P/L numbers.
+    """
+    canvas_w = int(canvas_size[0])
+    up_w, up_h = int(upload_size[0]), int(upload_size[1])
+    if up_w < 4 or up_h < 2:
+        raise AigcError(f"upload size {up_w}x{up_h} is too small")
+    return UploadGeometry(
+        canvas_size=(up_w, up_h),
+        source_size=(up_w, up_h),
+        band_w=0,
+        region_left=(0, 0),
+        region_main=(0, up_w),
+        region_right=(up_w, up_w),
+        scale=up_w / canvas_w,
+    )
+
+
 def scaled_geometry(manifest_canvas: tuple[int, int], manifest_source: tuple[int, int],
                     upload_size: tuple[int, int]) -> UploadGeometry:
     """Proportional geometry of the upload raster, boundaries rounded to even columns."""

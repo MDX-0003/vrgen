@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from vrgen import cli as vrgen_cli
 from vrgen import jobs
 from vrgen.cli import app
+from vrgen.errors import UsageError
 from vrgen.prep.budget import InputSpec
 
 runner = CliRunner()
@@ -174,6 +176,36 @@ def _params_offline(tmp_path, monkeypatch):
         width=4668, height=2000, fps=30.0, duration_s=7.979,
         size_bytes=228_200_000, container=("mp4",)))
     return input
+
+
+def test_params_show_without_input_returns_modes_only(tmp_path, monkeypatch):
+    _params_offline(tmp_path, monkeypatch)
+    r = runner.invoke(app, ["params", "show", "--job", "j1",
+                            "--workdir", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    data = json.loads(r.output)
+    assert data["output"] == [] and data["input"] == []
+    assert data["modes"][0]["value"] == "videoEdit"
+    assert "roles" in data["modes"][0]
+
+
+def test_params_save_accepts_mode_only(tmp_path):
+    wd = str(tmp_path)
+    r = runner.invoke(app, ["params", "save", "--job", "j1",
+                            "--mode", "allMediaRef", "--workdir", wd])
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["mode"] == "allMediaRef"
+    text = jobs.generation_params_path(tmp_path, "j1").read_text(encoding="utf-8")
+    assert 'mode = "allMediaRef"' in text
+
+
+def test_prompt_show_marks_gen_multi_computed_keys(tmp_path):
+    from vrgen import jobs as jobs_mod
+    payload = jobs_mod.prompt_overview(tmp_path, "j1", template="gen-multi")
+    assert set(payload["computed_keys"]) == {"asset_list", "task_rule", "timeline_rule"}
+    with pytest.raises(UsageError, match="自动生成"):
+        jobs_mod.edit_prompt_vars(tmp_path, "j1", sets={"asset_list": "x"},
+                                  template="gen-multi")
 
 
 def test_params_show_reports_both_resolution_kinds(tmp_path, monkeypatch):

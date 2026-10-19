@@ -16,6 +16,7 @@ import typer
 
 from . import __version__, jobs, manual
 from . import config as config_mod
+from . import refs as refs_mod
 from . import sessions as sessions_mod
 from .errors import TaskFailed, UsageError, VrgenError
 from .paths import templates_dir
@@ -133,14 +134,16 @@ def _parse_wh(text: str, what: str) -> tuple[int, int]:
 @app.command()
 def submit(
     job: str = typer.Option(..., "--job", help="job 名（调用方通常传 case 名）。"),
-    input: Path = typer.Option(..., "--input", exists=True, dir_okay=False,
-                               help="送生成的视频（pad 画布或视口 clip）。"),
-    canvas: str = typer.Option(..., "--canvas",
-                               help="画布尺寸 WxH（提示词几何占位符的来源，如 4668x2000）。"),
-    source: str = typer.Option(..., "--source",
-                               help="源尺寸 WxH（冗余带宽度 = canvas 宽 - source 宽）。"),
+    input: Path = typer.Option(None, "--input", exists=True, dir_okay=False,
+                               help="送生成的视频（patch/fullredraw；与 --refs 互斥）。"),
+    refs: Path = typer.Option(None, "--refs", exists=True, dir_okay=False,
+                              help="gen 多素材清单 JSON（与 --input 互斥）。"),
+    canvas: str = typer.Option(None, "--canvas",
+                               help="画布尺寸 WxH；gen 可省略，由母版推导。"),
+    source: str = typer.Option(None, "--source",
+                               help="源尺寸 WxH；gen 可省略，由母版推导。"),
     mask: Path = typer.Option(None, "--mask", exists=True, dir_okay=False,
-                              help="区域标注图（可选）。"),
+                              help="区域标注图（仅 patch/fullredraw）。"),
     template: str = typer.Option(
         None, "--template", help="模板 id；首次指定后记入 prompt-vars 草稿。"),
     sets: list[str] = typer.Option(None, "--set",
@@ -177,25 +180,39 @@ def submit(
             resolution=resolution, duration=duration, num=num,
             aspect_ratio=aspect_ratio, scale=scale, session_id=session_id,
         )
-        canvas_size = _parse_wh(canvas, "--canvas")
-        source_size = _parse_wh(source, "--source")
+        if refs is not None and input is not None:
+            raise UsageError("--refs 与 --input 互斥：gen 多素材只走 --refs")
+        if refs is None and input is None:
+            raise UsageError("需要 --input（patch/fullredraw）或 --refs（gen 多素材）")
+        if refs is not None and mask is not None:
+            raise UsageError("--mask 只用于 patch/fullredraw；gen 的图片请放进 --refs 清单")
+        if (canvas is None) != (source is None):
+            raise UsageError("--canvas 与 --source 要么都给，要么都不给")
+        canvas_size = _parse_wh(canvas, "--canvas") if canvas else None
+        source_size = _parse_wh(source, "--source") if source else None
+        if refs is None and (canvas_size is None or source_size is None):
+            raise UsageError("--input 路径必须同时给 --canvas 与 --source")
+        ref_assets = refs_mod.load_refs(refs) if refs is not None else ()
 
         # prompt-vars 草稿 + --set（自适应校验）+ 模板解析（首次指定记入草稿）
         pv = jobs.load_prompt_vars(workdir, job)
         overrides = _parse_kv(sets)
         merged = jobs.apply_set(pv, overrides) if overrides else pv
-        template_id = template or pv.template or str(conf.get("mglc.prompt_template"))
-        if template and template != pv.template:
+        template_id = template or pv.template or (
+            "gen-multi" if ref_assets else str(conf.get("mglc.prompt_template")))
+        if (template_id != pv.template
+                and (template is not None or (ref_assets and pv.template is None))):
             jobs.save_prompt_vars(workdir, job,
-                                  jobs.PromptVars(template=template, vars=pv.vars))
+                                  jobs.PromptVars(template=template_id, vars=pv.vars))
         if not (Path(templates_dir()) / f"{template_id}.md").is_file():
             available = sorted(p.stem for p in Path(templates_dir()).glob("*.md"))
             raise UsageError(f"模板 {template_id!r} 不存在；可用：{available}")
 
-        pkg = InputPackage(job=job, input=Path(input), mask=Path(mask) if mask else None,
+        pkg = InputPackage(job=job, input=Path(input) if input else None,
+                           mask=Path(mask) if mask else None,
                            canvas_size=canvas_size, source_size=source_size,
                            workdir=jobs.job_dir(workdir, job), template=template_id,
-                           variables=dict(merged.vars))
+                           variables=dict(merged.vars), refs=ref_assets)
         prepared = prepare_round(conf, pkg, log=log)
     except VrgenError as exc:
         _fail(exc)
@@ -215,7 +232,7 @@ def submit(
     print(prepared.run.prompt)
 
     from .platform.binpath import find_mglc
-    command = shell_line([find_mglc(conf) or "mglc", "video", "generate", *build_generate_argv(
+    common = dict(
         prompt=prepared.run.prompt,
         model_id=int(prepared.run.params["model_id"]),
         mode=str(prepared.run.params["mode"]),
@@ -223,13 +240,25 @@ def submit(
         resolution=str(prepared.run.params["resolution"]),
         aspect_ratio=str(prepared.run.params["aspect_ratio"]),
         num=int(prepared.run.params.get("num", 1)),
-        upload=prepared.run.upload.get("path", ""),
-        mask=(prepared.run.mask or {}).get("path"),
-        video_asset_id=prepared.run.assets.get("video"),
-        image_asset_id=prepared.run.assets.get("image"),
         keep_sound=bool(prepared.run.params.get("keep_sound", True)),
         session_id=int(prepared.run.params.get("session_id", 0) or 0),
-        preview=True)])
+        preview=True)
+    ledger_refs = prepared.run.params.get("refs") or []
+    if ledger_refs:
+        videos = [(str(item["upload"]),
+                   prepared.run.assets.get(f"video:{item['id']}"))
+                  for item in ledger_refs if item.get("kind") == "video"]
+        images = [(str(item["upload"]),
+                   prepared.run.assets.get(f"image:{item['id']}"))
+                  for item in ledger_refs if item.get("kind") == "image"]
+        gen_argv = build_generate_argv(**common, videos=videos, images=images)
+    else:
+        gen_argv = build_generate_argv(
+            **common, upload=prepared.run.upload.get("path", ""),
+            mask=(prepared.run.mask or {}).get("path"),
+            video_asset_id=prepared.run.assets.get("video"),
+            image_asset_id=prepared.run.assets.get("image"))
+    command = shell_line([find_mglc(conf) or "mglc", "video", "generate", *gen_argv])
     print(f"\ncommand     {command}")
 
     if dry_run:
@@ -439,25 +468,27 @@ app.add_typer(params_app, name="params")
 @params_app.command("show")
 def params_show(
     job: str = typer.Option(..., "--job", help="job 名（调用方通常传 case 名）。"),
-    input: Path = typer.Option(..., "--input", exists=True, dir_okay=False,
-                               help="送生成的视频（用于计算 auto 输入尺寸）。"),
-    canvas: str = typer.Option(..., "--canvas", help="画布尺寸 WxH。"),
-    source: str = typer.Option(..., "--source", help="源尺寸 WxH（冗余带宽度来源）。"),
+    input: Path = typer.Option(None, "--input", exists=True, dir_okay=False,
+                               help="送生成的视频；省略时只返回模式与当前草稿。"),
+    canvas: str = typer.Option(None, "--canvas", help="画布尺寸 WxH；有 --input 时必填。"),
+    source: str = typer.Option(None, "--source", help="源尺寸 WxH；有 --input 时必填。"),
     aspect_ratio: str = typer.Option(
         None, "--aspect-ratio",
         help="覆盖 fixed 里的输出比例；auto 表示跟随输入（gen 流用）。"),
     config: Path = typer.Option(None, "--config", help="TOML 配置文件。"),
     workdir: Path = typer.Option(None, "--workdir", help="台账根（默认 $VRGEN_RUNS_DIR）。"),
 ) -> None:
-    """输出分辨率档位 + 输入缩放档位的实际宽高，以及当前草稿/固定参数。"""
+    """输出分辨率档位 + 输入缩放档位的实际宽高，以及当前草稿/固定参数。
+
+    没有 ``--input`` 时（新建 gen case、素材还没加）只返回 ``modes`` 与
+    ``current``，``output``/``input`` 为空数组；页面据此先渲染模式下拉框。
+    """
     try:
         conf = config_mod.load(config)
         _apply_generation_params(
             conf, workdir, job, model_id=None, mode=None, resolution=None,
             duration=None, num=None, aspect_ratio=aspect_ratio, scale=None,
         )
-        canvas_size = _parse_wh(canvas, "--canvas")
-        _parse_wh(source, "--source")
         models = load_models(jobs.job_dir(workdir, job),
                              url=str(conf.get("mglc.model_list_url")),
                              max_age_h=float(conf.get("mglc.models_max_age_h", 24.0)),
@@ -466,35 +497,29 @@ def params_show(
         limits = model.mode(str(conf.get("mglc.mode")))
         if not limits.takes_video:
             raise UsageError(f"model {model.code} mode {limits.mode} 不接受输入视频")
-        spec = probe_input(input, conf)
-        duration_s = int(conf.get("mglc.duration_s")) or params_mod.derived_duration(spec)
         saved = jobs.load_generation_params(workdir, job)
         aspect = params_mod.effective_aspect(str(conf.get("mglc.aspect_ratio")),
                                              limits.ratios)
-        if aspect != "auto" and ":" in aspect:
-            left, _, right = aspect.partition(":")
-            ratio = int(left) / int(right)
-        else:
-            ratio = canvas_size[0] / canvas_size[1]
-        outputs = params_mod.output_options(ratio)
-        if limits.resolutions:
-            outputs = [o for o in outputs if o["value"] in limits.resolutions]
-        payload = {
+        modes = [
+            {
+                "value": m.mode,
+                "label": params_mod.MODE_LABELS.get(m.mode, m.mode),
+                "takes_video": m.takes_video,
+                "ratios": list(m.ratios),
+                "max_count": m.max_count,
+                "max_videos": getattr(m, "max_videos", 0),
+                "max_images": getattr(m, "max_images", 0),
+                "video_required": True,
+                "roles": {kind: list(roles) for kind, roles in
+                          params_mod.MODE_ROLES.get(m.mode, {}).items()},
+                "duration": dict(m.duration or {}),
+            }
+            for m in model.modes.values()
+            if m.takes_video and m.mode in params_mod.SUPPORTED_MODES
+        ]
+        common = {
             "job": job,
-            "output": outputs,
-            "input": params_mod.input_options(canvas_size, spec,
-                                              limits.ref_video_limits()),
-            "modes": [
-                {
-                    "value": m.mode,
-                    "label": params_mod.MODE_LABELS.get(m.mode, m.mode),
-                    "takes_video": m.takes_video,
-                    "ratios": list(m.ratios),
-                    "max_count": m.max_count,
-                    "duration": dict(m.duration or {}),
-                }
-                for m in model.modes.values() if m.takes_video
-            ],
+            "modes": modes,
             "current": {
                 "resolution": str(conf.get("mglc.resolution")),
                 "scale": str(conf.get("mglc.scale")),
@@ -506,11 +531,35 @@ def params_show(
             },
             "fixed": {
                 "model_id": model.code,
-                "duration_s": duration_s,
+                "duration_s": int(conf.get("mglc.duration_s") or 0),
                 "num": int(conf.get("mglc.num", 1)),
             },
             "saved": jobs.generation_params_path(workdir, job).is_file(),
         }
+        if input is None:
+            payload = {"output": [], "input": [], **common}
+        else:
+            if canvas is None or source is None:
+                raise UsageError("给了 --input 就要同时给 --canvas 与 --source")
+            canvas_size = _parse_wh(canvas, "--canvas")
+            _parse_wh(source, "--source")
+            spec = probe_input(input, conf)
+            duration_s = int(conf.get("mglc.duration_s")) or params_mod.derived_duration(spec)
+            if aspect != "auto" and ":" in aspect:
+                left, _, right = aspect.partition(":")
+                ratio = int(left) / int(right)
+            else:
+                ratio = canvas_size[0] / canvas_size[1]
+            outputs = params_mod.output_options(ratio)
+            if limits.resolutions:
+                outputs = [o for o in outputs if o["value"] in limits.resolutions]
+            common["fixed"]["duration_s"] = duration_s
+            payload = {
+                "output": outputs,
+                "input": params_mod.input_options(canvas_size, spec,
+                                                  limits.ref_video_limits()),
+                **common,
+            }
     except VrgenError as exc:
         _fail(exc)
     _echo_payload(payload)
@@ -519,10 +568,10 @@ def params_show(
 @params_app.command("save")
 def params_save(
     job: str = typer.Option(..., "--job", help="job 名（调用方通常传 case 名）。"),
-    resolution: str = typer.Option(..., "--resolution",
-                                   help="输出档位：480p | 720p | 1080p。"),
-    scale: str = typer.Option(..., "--scale",
-                              help="输入缩放：auto | full | half。"),
+    resolution: str = typer.Option(None, "--resolution",
+                                   help="输出档位：480p | 720p | 1080p；省略保留已有值。"),
+    scale: str = typer.Option(None, "--scale",
+                              help="输入缩放：auto | full | half；省略保留已有值。"),
     mode: str = typer.Option(
         None, "--mode", help="生成模式（videoEdit/allMediaRef/videoExtend）；不传保留已有值。"),
     aspect_ratio: str = typer.Option(
@@ -536,11 +585,15 @@ def params_save(
         None, "--episode", help="会话所属剧集序号（仅用于页面回显）。"),
     workdir: Path = typer.Option(None, "--workdir", help="台账根（默认 $VRGEN_RUNS_DIR）。"),
 ) -> None:
-    """保存 job 级生成参数草稿（写 runs/<job>/generation.toml）。"""
+    """保存 job 级生成参数草稿（写 runs/<job>/generation.toml）。
+
+    所有字段都可省略；省略时保留已有值。新建 gen case 只传 ``--mode``，分辨率与
+    缩放在素材步骤完成后再写。
+    """
     try:
-        if resolution not in params_mod.OUTPUT_TIERS:
+        if resolution is not None and resolution not in params_mod.OUTPUT_TIERS:
             raise UsageError("resolution 只能是 480p | 720p | 1080p")
-        if scale not in params_mod.INPUT_MODES:
+        if scale is not None and scale not in params_mod.INPUT_MODES:
             raise UsageError("scale 只能是 auto | full | half")
         if session_id is not None and session_id < 0:
             raise UsageError("session-id 必须 >= 0")
@@ -548,6 +601,9 @@ def params_save(
             raise UsageError("project-id 必须 >= 0")
         if episode is not None and episode < 0:
             raise UsageError("episode 必须 >= 0")
+        if all(v is None for v in (resolution, scale, mode, aspect_ratio,
+                                   session_id, project_id, episode)):
+            raise UsageError("没有要保存的参数")
         saved = jobs.load_generation_params(workdir, job)
         if mode is None:
             mode = saved.mode
@@ -575,16 +631,19 @@ def params_save(
                 episode = saved.episode
             if episode and not project_id:
                 raise UsageError("给了 --episode 就必须给 --project-id")
+        effective_resolution = resolution if resolution is not None else saved.resolution
+        effective_scale = scale if scale is not None else saved.scale
         jobs.save_generation_params(
             workdir, job,
-            jobs.GenerationParams(resolution=resolution, scale=scale,
+            jobs.GenerationParams(resolution=effective_resolution, scale=effective_scale,
                                   mode=mode, aspect_ratio=aspect_ratio,
                                   session_id=session_id or None,
                                   project_id=project_id or None,
                                   episode=episode or None))
     except VrgenError as exc:
         _fail(exc)
-    _echo_payload({"resolution": resolution, "scale": scale,
+    _echo_payload({"resolution": effective_resolution,
+                   "scale": effective_scale,
                    "mode": mode, "aspect_ratio": aspect_ratio,
                    "session_id": session_id or 0,
                    "project_id": project_id or 0,

@@ -46,6 +46,33 @@ def probe_input(path: str | Path, config=None) -> InputSpec:
     )
 
 
+def probe_image(path: str | Path, config=None) -> InputSpec:
+    """Image dimensions and bytes via one ffprobe read (no fps/duration)."""
+    path = Path(path)
+    if not path.is_file():
+        raise AigcError(f"no such file: {path}")
+    result = subprocess.run(
+        [videoio.ffprobe(config), "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "json", str(path)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if result.returncode != 0:
+        raise AigcError(
+            f"ffprobe could not read image {path.name}: {(result.stderr or '').strip()[:200]}")
+    import json
+    try:
+        streams = (json.loads(result.stdout or "{}").get("streams") or [])
+        width = int(streams[0].get("width") or 0)
+        height = int(streams[0].get("height") or 0)
+    except (IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise AigcError(f"ffprobe output for {path.name} is not usable: {exc}") from exc
+    if width < 2 or height < 2:
+        raise AigcError(f"{path.name}: ffprobe reported no image size")
+    suffix = path.suffix.lower().lstrip(".")
+    container = ("jpg",) if suffix in ("jpg", "jpeg") else (suffix,)
+    return InputSpec(width=width, height=height, fps=0.0, duration_s=0.0,
+                     size_bytes=path.stat().st_size, container=container)
+
+
 def _run(args: list[str], what: str) -> None:
     result = subprocess.run(args, capture_output=True, text=True,
                             encoding="utf-8", errors="replace")
@@ -93,4 +120,16 @@ def scale_image(src: str | Path, dst: str | Path, size: tuple[int, int], *,
           "-vf", f"scale={size[0]}:{size[1]}:flags=neighbor",
           "-c:v", "png", "-pix_fmt", "gray", str(dst)],
          f"rescaling {src.name}")
+    return dst
+
+
+def scale_reference_image(src: str | Path, dst: str | Path, size: tuple[int, int], *,
+                          config=None) -> Path:
+    """Smooth rescale for a reference image; output PNG keeps the pixels lossless."""
+    src, dst = Path(src), Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    _run([ffmpeg(config), "-y", "-v", "error", "-i", str(src),
+          "-vf", f"scale={size[0]}:{size[1]}:flags=lanczos",
+          "-frames:v", "1", str(dst)],
+         f"rescaling image {src.name}")
     return dst

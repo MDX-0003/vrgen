@@ -19,13 +19,14 @@ import vrgen.round.pipeline as pipe
 from vrgen import config as config_mod
 from vrgen import manual
 from vrgen.config import ConfigError
-from vrgen.errors import AigcError, BudgetError, LedgerError
+from vrgen.errors import AigcError, BudgetError, LedgerError, UsageError
 from vrgen.platform.client import Envelope, Mglc
 from vrgen.platform.models import find_model, load_models, parse_models
 from vrgen.prep.budget import InputSpec, check_input, suggest_size
 from vrgen.prep.prompt import geometry_variables, render
 from vrgen.prep.scale import choose_upload_size, parse_size_mode, scaled_geometry
 from vrgen.progress import Log
+from vrgen.refs import RefAsset
 from vrgen.round import task as task_mod
 from vrgen.round.assets import asset_state, classify, ensure_assets, extract_asset_id, status_of
 from vrgen.round.ledger import RunStore, assert_spendable, run_key
@@ -222,7 +223,11 @@ def test_run_key_is_stable_and_sensitive(tmp_path):
     assert a != run_key("prompt text!", video, mask, params)
     assert a != run_key("prompt text", video, mask, {**params, "resolution": "1080p"})
     video.write_bytes(b"different")
-    assert a != run_key("prompt text", video, mask, params)
+    current = run_key("prompt text", video, mask, params)
+    assert a != current
+    assert current != run_key("prompt text", video, mask, params,
+                              extra={"refs": [["v1", "abc"]]})
+    assert current == run_key("prompt text", video, mask, params, extra={})
 
 
 def test_run_store_round_trip_and_duplicate_refusal(tmp_path):
@@ -283,6 +288,19 @@ def test_build_generate_argv_auto_aspect_omits_the_flag():
         resolution="1080p", aspect_ratio="21:9", num=1, upload="up.mp4",
         video_asset_id=11)
     assert "--aspect-ratio" in argv and "21:9" in argv
+
+
+def test_build_generate_argv_carries_multiple_refs():
+    argv = task_mod.build_generate_argv(
+        prompt="p", model_id=37, mode="allMediaRef", duration_s=8,
+        resolution="1080p", aspect_ratio="16:9", num=1,
+        videos=[("v1.mp4", 11), ("v2.mp4", 12)],
+        images=[("i1.png", 21), ("i2.png", 22)])
+    joined = " ".join(argv)
+    assert joined.count("--video ") == 2 and joined.count("--video-asset-id") == 2
+    assert joined.count("--image ") == 2 and joined.count("--asset-id") == 2
+    assert argv.index("v2.mp4") > argv.index("v1.mp4")
+    assert argv.index("v1.mp4") < argv.index("11")
 
 
 def test_build_generate_argv_passes_project_session_id():
@@ -484,6 +502,114 @@ def test_prepare_round_reads_the_constants_from_config(tmp_path, monkeypatch):
     assert prepared.run.dir.name.startswith("t-")           # 以模板名命名
     assert "2334" in prepared.run.prompt
     assert "黄昏" in prepared.run.prompt
+
+
+def _model_cache_multi(workdir: Path) -> None:
+    validator = dict(V25_VIDEOEDIT)
+    workdir.mkdir(parents=True, exist_ok=True)
+    (workdir / "models.json").write_text(json.dumps({
+        "fetched_at": time.time(),
+        "items": [{"code": 37, "displayName": "Seedance 2.5",
+                   "modelConfig": {"maxPromptLength": 10000, "referenceModes": [
+                       {"mode": "videoEdit", "supportVirtualIp": True, "maxCount": 50,
+                        "resolutions": ["1080p"], "ratios": [],
+                        "duration": {"type": ""},
+                        "refVideoValidator": validator,
+                        "refImageValidator": {
+                            "maxCount": 30, "formats": ["png", "jpg", "jpeg", "webp"],
+                            "minPixel": 90000, "maxPixel": 36000000,
+                            "maxBytes": 31457280,
+                            "minAspectRatio": 0.4, "maxAspectRatio": 2.5}},
+                       {"mode": "allMediaRef", "supportVirtualIp": True, "maxCount": 50,
+                        "resolutions": ["1080p"], "ratios": ["16:9", "21:9"],
+                        "duration": {"min": 4, "max": 30},
+                        "refVideoValidator": validator,
+                        "refImageValidator": {
+                            "maxCount": 30, "formats": ["png", "jpg", "jpeg", "webp"],
+                            "minPixel": 90000, "maxPixel": 36000000,
+                            "maxBytes": 31457280,
+                            "minAspectRatio": 0.4, "maxAspectRatio": 2.5}}]}}],
+    }), encoding="utf-8")
+
+
+def test_prepare_round_gen_multi_assets(tmp_path, monkeypatch):
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    (templates / "t.md").write_text(
+        "{asset_list}\n{task_rule}\n{timeline_rule}\ncanvas {canvas_w}x{canvas_h}",
+        encoding="utf-8")
+    monkeypatch.setattr(pipe, "templates_dir", lambda: templates)
+    runs = tmp_path / "runs"
+    _model_cache_multi(runs / "j")
+
+    def fake_probe(path, conf):
+        duration = 8.2 if Path(path).name == "v2.mp4" else 5.0
+        return InputSpec(width=1920, height=1080, fps=30.0, duration_s=duration,
+                         size_bytes=1_000_000, container=("mp4",))
+
+    monkeypatch.setattr(pipe, "probe_input", fake_probe)
+    monkeypatch.setattr(pipe, "probe_image", lambda path, conf: InputSpec(
+        width=1000, height=1000, fps=0.0, duration_s=0.0,
+        size_bytes=500_000, container=("png",)))
+
+    def no_scale(*args, **kwargs):
+        raise AssertionError("素材已经合格，不该缩放")
+
+    monkeypatch.setattr(pipe, "scale_video", no_scale)
+    monkeypatch.setattr(pipe, "scale_reference_image", no_scale)
+
+    v1 = tmp_path / "v1.mp4"
+    v2 = tmp_path / "v2.mp4"
+    i1 = tmp_path / "i1.png"
+    v1.write_bytes(b"v1")
+    v2.write_bytes(b"v2")
+    i1.write_bytes(b"i1")
+    refs = (RefAsset("v1", "video", "edit_master", v1),
+            RefAsset("v2", "video", "motion_ref", v2),
+            RefAsset("i1", "image", "subject_ref", i1))
+    pkg = InputPackage(job="j", input=None, mask=None, canvas_size=None,
+                       source_size=None, workdir=runs / "j", template="t",
+                       variables={}, refs=refs)
+    conf = config_mod.load(overrides=["mglc.mode=allMediaRef",
+                                      "mglc.aspect_ratio=16:9"])
+    prepared = pipe.prepare_round(conf, pkg, log=Log(quiet=True))
+
+    assert prepared.geometry.canvas_size == (1920, 1080)
+    assert prepared.geometry.band_w == 0
+    assert prepared.run.params["duration_s"] == 9           # 最长视频 8.2s → 9
+    assert prepared.run.params["duration_source"] == "longest"
+    assert prepared.run.params["master"] == "v1"
+    assert [r["id"] for r in prepared.run.params["refs"]] == ["v1", "v2", "i1"]
+    assert prepared.run.upload["path"] == str(v1)
+    assert "@Video1" in prepared.run.prompt
+    assert "@Video2" in prepared.run.prompt
+    assert "@Image1" in prepared.run.prompt
+    assert "重新生成完整表演" in prepared.run.prompt
+    assert "1920x1080" in prepared.run.prompt
+
+
+def test_prepare_round_gen_rejects_bad_role_matrix(tmp_path, monkeypatch):
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    (templates / "t.md").write_text("{asset_list}", encoding="utf-8")
+    monkeypatch.setattr(pipe, "templates_dir", lambda: templates)
+    runs = tmp_path / "runs"
+    _model_cache_multi(runs / "j")
+    monkeypatch.setattr(pipe, "probe_input", lambda path, conf: InputSpec(
+        width=1920, height=1080, fps=30.0, duration_s=5.0,
+        size_bytes=1_000_000, container=("mp4",)))
+    v1 = tmp_path / "v1.mp4"
+    v2 = tmp_path / "v2.mp4"
+    v1.write_bytes(b"v1")
+    v2.write_bytes(b"v2")
+    refs = (RefAsset("v1", "video", "edit_master", v1),
+            RefAsset("v2", "video", "motion_ref", v2))
+    pkg = InputPackage(job="j", input=None, mask=None, canvas_size=None,
+                       source_size=None, workdir=runs / "j", template="t",
+                       variables={}, refs=refs)
+    conf = config_mod.load(overrides=["mglc.mode=videoEdit"])
+    with pytest.raises(UsageError, match="恰好需要 1 个视频"):
+        pipe.prepare_round(conf, pkg, log=Log(quiet=True))
 
 
 def test_prepare_round_is_idempotent(tmp_path, monkeypatch):

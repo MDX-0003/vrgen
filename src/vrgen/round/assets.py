@@ -90,8 +90,10 @@ def classify(status: str) -> str:
     return "unknown"
 
 
-def cached(run: Run, kind: str) -> int | None:
-    value = run.assets.get(kind)
+def cached(run: Run, key: str) -> int | None:
+    """Ledger assets lookup. Keys are ``video``/``image`` for the old single
+    path, or ``video:v1``/``image:i1`` for gen multi-asset rounds."""
+    value = run.assets.get(key)
     return int(value) if value else None
 
 
@@ -140,9 +142,15 @@ def wait_active(client: Mglc, asset_id: int, *, timeout: float = 1800.0,
 
 
 def ensure_assets(client: Mglc, run: Run, *, video: str | Path | None = None,
-                  mask: str | Path | None = None, poll: bool = True,
-                  timeout: float = 1800.0, interval: float = 15.0, log=None) -> dict[str, int]:
+                  mask: str | Path | None = None,
+                  refs: list[tuple[str, str, str | Path]] | None = None,
+                  poll: bool = True, timeout: float = 1800.0, interval: float = 15.0,
+                  log=None) -> dict[str, int]:
     """Upload + approve whatever this run needs, verifying anything already recorded.
+
+    ``refs`` is the gen multi-asset form: ``[(key, kind, path)]`` where ``key`` is
+    the ledger key (``video:v1`` / ``image:i1``). ``video`` / ``mask`` remain the
+    single-video form used by patch and fullredraw.
 
     **Recorded ids are verified, not trusted.** They are reusable across rounds -- but
     only within the same account: the first real "does not belong to the current
@@ -153,19 +161,23 @@ def ensure_assets(client: Mglc, run: Run, *, video: str | Path | None = None,
     object from the previous account). Failing here costs nothing; failing at submit
     costs the round.
     """
-    wanted: list[tuple[str, Path]] = []
-    if video is not None:
-        wanted.append((KIND_VIDEO, Path(video)))
-    if mask is not None:
-        wanted.append((KIND_IMAGE, Path(mask)))
+    wanted: list[tuple[str, str, Path]] = []
+    if refs is not None:
+        for key, kind, path in refs:
+            wanted.append((key, kind, Path(path)))
+    else:
+        if video is not None:
+            wanted.append((KIND_VIDEO, KIND_VIDEO, Path(video)))
+        if mask is not None:
+            wanted.append((KIND_IMAGE, KIND_IMAGE, Path(mask)))
 
-    for kind, path in wanted:
-        existing = cached(run, kind)
+    for key, kind, path in wanted:
+        existing = cached(run, key)
         if existing is not None:
             state = asset_state(client, existing)
             if state == "ok":
                 if log is not None:
-                    log.info(f"{kind} asset {existing} still valid")
+                    log.info(f"{key} asset {existing} still valid")
                 continue
             if state == "pending":
                 if poll:
@@ -173,13 +185,13 @@ def ensure_assets(client: Mglc, run: Run, *, video: str | Path | None = None,
                                 log=log)
                 continue
             if log is not None:
-                log.warn(f"{kind} asset {existing} is {state} for this account; "
+                log.warn(f"{key} asset {existing} is {state} for this account; "
                          f"re-registering {path.name}")
-            run.assets.pop(kind, None)
+            run.assets.pop(key, None)
             run.note(f"asset {existing} no longer usable ({state}); re-registered")
             run.save()
 
-        asset_id = upload(client, path, kind)
+        asset_id = upload(client, path, kind, name=f"{key.replace(':', '_')}_{path.stem}")
         state = asset_state(client, asset_id)
         if state in ("stale", "failed", "unreadable"):
             raise AssetError(
@@ -189,11 +201,11 @@ def ensure_assets(client: Mglc, run: Run, *, video: str | Path | None = None,
                 f"object registered by a previous account; clear it and retry:\n"
                 f"    {_upload_cache_hint()}"
             )
-        run.assets[kind] = asset_id
-        run.note(f"uploaded {kind} {path.name} -> asset {asset_id}")
+        run.assets[key] = asset_id
+        run.note(f"uploaded {key} {path.name} -> asset {asset_id}")
         run.save()
         if log is not None:
-            log.step(f"uploaded {kind} {path.name} -> asset {asset_id}")
+            log.step(f"uploaded {key} {path.name} -> asset {asset_id}")
         if poll:
             status = wait_active(client, asset_id, timeout=timeout, interval=interval,
                                  log=log)
