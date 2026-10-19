@@ -20,13 +20,22 @@ is deliberately absent from the UI and from ``generation.toml``.
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 from .budget import InputSpec, check_input, even_down
 from .scale import choose_upload_size
 
 INPUT_MODES = ("auto", "full", "half")
 OUTPUT_TIERS = ("480p", "720p", "1080p")
+
+#: 面向视频素材的生成模式；label 只用于页面展示，值仍然是 mglc 的模式名。
+MODE_LABELS = {
+    "videoEdit": "VideoEdit · 结构锁定编辑（动作跟随输入）",
+    "allMediaRef": "AllMediaRef · 多素材参考（可重新生成动作）",
+    "videoExtend": "VideoExtend · 延长视频",
+    "firstFrame": "FirstFrame · 首帧生视频",
+    "firstLastFrame": "FirstLastFrame · 首尾帧生视频",
+}
 
 #: 21:9 outputs. 720p is the measured ship_01 result; 480p/1080p are the
 #: platform's published table. The gate in run.json is the final authority for
@@ -105,3 +114,21 @@ def derived_duration(spec: InputSpec) -> int:
     """The integer seconds submit sends: ``videoEdit`` follows the input timeline."""
     seconds = spec.duration_s if spec.duration_s > 0 else 0.0
     return max(4, int(math.ceil(seconds)))
+
+
+def effective_aspect(aspect_ratio: str, ratios: Sequence[str]) -> str:
+    """Resolve the aspect value sent to mglc for this mode.
+
+    Modes with an empty ratio list (``videoEdit`` / ``videoExtend``) follow the
+    input; ``auto`` then means "do not send the flag". Modes such as
+    ``allMediaRef`` publish a closed ratio list, so ``auto`` maps to 16:9 when
+    available, otherwise the first published ratio.
+    """
+    value = str(aspect_ratio or "").strip()
+    if not ratios:
+        return "auto" if value in ("", "auto") else value
+    if value in ratios:
+        return value
+    if value in ("", "auto"):
+        return "16:9" if "16:9" in ratios else ratios[0]
+    return value

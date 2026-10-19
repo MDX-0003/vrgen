@@ -67,11 +67,12 @@ def _apply_generation_params(conf, workdir, job, *, model_id, mode, resolution,
     saved = jobs.load_generation_params(workdir, job)
     picks = {
         "model_id": model_id,
-        "mode": mode,
+        "mode": mode if mode is not None else saved.mode,
         "resolution": resolution if resolution is not None else saved.resolution,
         "duration_s": duration,
         "num": num,
-        "aspect_ratio": aspect_ratio,
+        "aspect_ratio": (aspect_ratio if aspect_ratio is not None
+                         else saved.aspect_ratio),
         "scale": scale if scale is not None else saved.scale,
         "session_id": session_id if session_id is not None else saved.session_id,
     }
@@ -96,8 +97,10 @@ def _apply_generation_params(conf, workdir, job, *, model_id, mode, resolution,
     if not str(conf.get("mglc.aspect_ratio")).strip():
         raise UsageError("--aspect-ratio 不能为空（写 W:H 如 21:9；videoEdit 跟随输入时写 auto）")
     aspect = str(conf.get("mglc.aspect_ratio")).strip()
-    if aspect != "auto" and ":" not in aspect:
-        raise UsageError("--aspect-ratio 必须是 W:H（如 21:9），或 auto 表示跟随输入")
+    if aspect != "auto":
+        left, _, right = aspect.partition(":")
+        if not (left.isdigit() and right.isdigit() and int(left) > 0 and int(right) > 0):
+            raise UsageError("--aspect-ratio 必须是 W:H（如 21:9），或 auto 表示跟随输入")
     if scale is not None and scale not in params_mod.INPUT_MODES:
         raise UsageError("--scale 只能是 auto | full | half")
     if saved.scale is not None and saved.scale not in params_mod.INPUT_MODES:
@@ -466,7 +469,14 @@ def params_show(
         spec = probe_input(input, conf)
         duration_s = int(conf.get("mglc.duration_s")) or params_mod.derived_duration(spec)
         saved = jobs.load_generation_params(workdir, job)
-        outputs = params_mod.output_options(canvas_size[0] / canvas_size[1])
+        aspect = params_mod.effective_aspect(str(conf.get("mglc.aspect_ratio")),
+                                             limits.ratios)
+        if aspect != "auto" and ":" in aspect:
+            left, _, right = aspect.partition(":")
+            ratio = int(left) / int(right)
+        else:
+            ratio = canvas_size[0] / canvas_size[1]
+        outputs = params_mod.output_options(ratio)
         if limits.resolutions:
             outputs = [o for o in outputs if o["value"] in limits.resolutions]
         payload = {
@@ -474,17 +484,28 @@ def params_show(
             "output": outputs,
             "input": params_mod.input_options(canvas_size, spec,
                                               limits.ref_video_limits()),
+            "modes": [
+                {
+                    "value": m.mode,
+                    "label": params_mod.MODE_LABELS.get(m.mode, m.mode),
+                    "takes_video": m.takes_video,
+                    "ratios": list(m.ratios),
+                    "max_count": m.max_count,
+                    "duration": dict(m.duration or {}),
+                }
+                for m in model.modes.values() if m.takes_video
+            ],
             "current": {
                 "resolution": str(conf.get("mglc.resolution")),
                 "scale": str(conf.get("mglc.scale")),
+                "mode": limits.mode,
+                "aspect_ratio": aspect,
                 "session_id": int(conf.get("mglc.session_id", 0)),
                 "project_id": saved.project_id or 0,
                 "episode": saved.episode or 0,
             },
             "fixed": {
                 "model_id": model.code,
-                "mode": limits.mode,
-                "aspect_ratio": str(conf.get("mglc.aspect_ratio")),
                 "duration_s": duration_s,
                 "num": int(conf.get("mglc.num", 1)),
             },
@@ -502,6 +523,10 @@ def params_save(
                                    help="输出档位：480p | 720p | 1080p。"),
     scale: str = typer.Option(..., "--scale",
                               help="输入缩放：auto | full | half。"),
+    mode: str = typer.Option(
+        None, "--mode", help="生成模式（videoEdit/allMediaRef/videoExtend）；不传保留已有值。"),
+    aspect_ratio: str = typer.Option(
+        None, "--aspect-ratio", help="输出比例；auto = 跟随输入；不传保留已有值。"),
     session_id: int = typer.Option(
         None, "--session-id",
         help="项目生成会话 ID（>0）；0 = 个人额度；不传 = 保留已有设置。"),
@@ -524,6 +549,17 @@ def params_save(
         if episode is not None and episode < 0:
             raise UsageError("episode 必须 >= 0")
         saved = jobs.load_generation_params(workdir, job)
+        if mode is None:
+            mode = saved.mode
+        if aspect_ratio is None:
+            aspect_ratio = saved.aspect_ratio
+        if mode is not None and not str(mode).strip():
+            raise UsageError("mode 不能为空")
+        if aspect_ratio is not None:
+            value = str(aspect_ratio).strip()
+            if value != "auto" and ":" not in value:
+                raise UsageError("aspect-ratio 必须是 W:H（如 16:9），或 auto")
+            aspect_ratio = value
         if session_id is None:
             if project_id is not None or episode is not None:
                 raise UsageError("改项目/剧集时请同时给 --session-id")
@@ -542,12 +578,14 @@ def params_save(
         jobs.save_generation_params(
             workdir, job,
             jobs.GenerationParams(resolution=resolution, scale=scale,
+                                  mode=mode, aspect_ratio=aspect_ratio,
                                   session_id=session_id or None,
                                   project_id=project_id or None,
                                   episode=episode or None))
     except VrgenError as exc:
         _fail(exc)
     _echo_payload({"resolution": resolution, "scale": scale,
+                   "mode": mode, "aspect_ratio": aspect_ratio,
                    "session_id": session_id or 0,
                    "project_id": project_id or 0,
                    "episode": episode or 0})

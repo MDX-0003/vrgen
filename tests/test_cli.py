@@ -143,6 +143,9 @@ class _Limits:
     mode = "videoEdit"
     takes_video = True
     resolutions = ("480p", "720p", "1080p")
+    ratios = ()
+    max_count = 1
+    duration = {"type": "range", "min": 4, "max": 30}
 
     def ref_video_limits(self):
         return {"minPixel": 409_600, "maxPixel": 8_295_044,
@@ -156,6 +159,7 @@ class _Limits:
 
 class _Model:
     code = 37
+    modes = {"videoEdit": _Limits()}
 
     def mode(self, name):
         return _Limits()
@@ -185,7 +189,11 @@ def test_params_show_reports_both_resolution_kinds(tmp_path, monkeypatch):
     assert sizes["full"] == (4668, 2000, False)       # 像素和体积都超限
     assert sizes["half"] == (2334, 1000, True)
     assert data["current"] == {"resolution": "1080p", "scale": "auto",
+                               "mode": "videoEdit", "aspect_ratio": "21:9",
                                "session_id": 0, "project_id": 0, "episode": 0}
+    assert data["fixed"] == {"model_id": 37, "duration_s": 8, "num": 1}
+    assert data["modes"][0]["value"] == "videoEdit"
+    assert data["modes"][0]["ratios"] == []
     assert data["fixed"]["duration_s"] == 8
     assert data["saved"] is False
 
@@ -198,6 +206,7 @@ def test_params_save_roundtrips_through_show(tmp_path, monkeypatch):
                             "--workdir", wd])
     assert r.exit_code == 0, r.output
     assert json.loads(r.output) == {"resolution": "720p", "scale": "half",
+                                    "mode": None, "aspect_ratio": None,
                                     "session_id": 0, "project_id": 0, "episode": 0}
     assert jobs.generation_params_path(tmp_path, "j1").is_file()
 
@@ -205,8 +214,9 @@ def test_params_save_roundtrips_through_show(tmp_path, monkeypatch):
                             "--input", str(input), "--canvas", "4668x2000",
                             "--source", "4000x2000", "--workdir", wd])
     data = json.loads(r.output)
-    assert data["current"] == {"resolution": "720p", "scale": "half",
-                               "session_id": 0, "project_id": 0, "episode": 0}
+    assert data["current"]["resolution"] == "720p"
+    assert data["current"]["scale"] == "half"
+    assert data["current"]["mode"] == "videoEdit"
     assert data["saved"] is True
 
 
@@ -267,7 +277,7 @@ def test_params_show_aspect_auto_is_reported_for_gen(tmp_path, monkeypatch):
                             "--workdir", str(tmp_path)])
     assert r.exit_code == 0, r.output
     data = json.loads(r.output)
-    assert data["fixed"]["aspect_ratio"] == "auto"
+    assert data["current"]["aspect_ratio"] == "auto"
     assert {o["value"] for o in data["output"]} == {"480p", "720p", "1080p"}
 
 
@@ -278,6 +288,27 @@ def test_gen_edit_template_is_available_and_needs_its_variables():
                 "allowed_changes"):
         assert "{" + key + "}" in text
     assert "{theme}" not in text
+
+
+def test_effective_aspect_maps_modes_with_a_ratio_list():
+    from vrgen.prep.params import effective_aspect
+    assert effective_aspect("auto", ()) == "auto"
+    assert effective_aspect("auto", ("16:9", "21:9")) == "16:9"
+    assert effective_aspect("21:9", ("16:9", "21:9")) == "21:9"
+
+
+def test_params_save_persists_mode_and_aspect(tmp_path, monkeypatch):
+    input = _params_offline(tmp_path, monkeypatch)
+    wd = str(tmp_path)
+    r = runner.invoke(app, ["params", "save", "--job", "j1",
+                            "--resolution", "1080p", "--scale", "auto",
+                            "--mode", "allMediaRef", "--aspect-ratio", "16:9",
+                            "--workdir", wd])
+    assert r.exit_code == 0, r.output
+    echo = json.loads(r.output)
+    assert echo["mode"] == "allMediaRef" and echo["aspect_ratio"] == "16:9"
+    text = jobs.generation_params_path(tmp_path, "j1").read_text(encoding="utf-8")
+    assert 'mode = "allMediaRef"' in text and 'aspect_ratio = "16:9"' in text
 
 
 def test_params_save_rejects_values_outside_the_ui_set(tmp_path):

@@ -23,6 +23,7 @@ from ..platform.client import Mglc
 from ..platform.media import probe_input, scale_image, scale_video
 from ..platform.models import ModeLimits, ModelInfo, find_model, load_models
 from ..prep.budget import InputSpec, check_input
+from ..prep.params import effective_aspect
 from ..prep.prompt import geometry_variables, render, resolve_template
 from ..prep.scale import UploadGeometry, choose_upload_size, parse_size_mode, scaled_geometry
 from .assets import ensure_assets
@@ -107,6 +108,11 @@ def prepare_round(conf, pkg: InputPackage, *, log) -> Prepared:
                          max_age_h=float(conf.get("mglc.models_max_age_h", 24.0)), log=log)
     model = find_model(models, int(conf.get("mglc.model_id")))
     limits = model.mode(str(conf.get("mglc.mode")))
+    aspect = effective_aspect(str(conf.get("mglc.aspect_ratio")), limits.ratios)
+    if limits.ratios and aspect not in limits.ratios:
+        raise AigcError(
+            f"mode {limits.mode} 只接受这些输出比例：{', '.join(limits.ratios)}；"
+            f"当前是 {aspect!r}")
     if not limits.takes_video:
         raise AigcError(
             f"model {model.code} ({model.name}) mode {limits.mode!r} does not accept an "
@@ -138,7 +144,7 @@ def prepare_round(conf, pkg: InputPackage, *, log) -> Prepared:
         "mode": limits.mode,
         "resolution": str(conf.get("mglc.resolution")),
         "duration_s": _duration_s(conf, spec),
-        "aspect_ratio": str(conf.get("mglc.aspect_ratio")),
+        "aspect_ratio": aspect,
         "num": int(conf.get("mglc.num", 1)),
         "session_id": int(conf.get("mglc.session_id", 0)),
         "scale": f"{upload_size[0]}x{upload_size[1]}",

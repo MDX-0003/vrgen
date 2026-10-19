@@ -114,6 +114,8 @@ GENERATION = "generation.toml"
 class GenerationParams:
     resolution: str | None = None   # mglc 输出档位 480p/720p/1080p
     scale: str | None = None        # vrgen 上传缩放 auto/full/half
+    mode: str | None = None         # mglc 生成模式 videoEdit/allMediaRef/videoExtend
+    aspect_ratio: str | None = None # 输出比例；auto = 跟随输入（无比例选项的模式）
     session_id: int | None = None   # >0 = 项目生成会话；计费走项目额度
     project_id: int | None = None   # 仅用于页面回显会话所属项目
     episode: int | None = None      # 仅用于页面回显会话所属剧集
@@ -130,10 +132,13 @@ def load_generation_params(workdir: str | Path | None, job: str) -> GenerationPa
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     resolution = data.get("resolution")
     scale = data.get("scale")
+    mode = data.get("mode")
+    aspect_ratio = data.get("aspect_ratio")
     session_id = data.get("session_id")
     project_id = data.get("project_id")
     episode = data.get("episode")
-    for key, value in (("resolution", resolution), ("scale", scale)):
+    for key, value in (("resolution", resolution), ("scale", scale),
+                       ("mode", mode), ("aspect_ratio", aspect_ratio)):
         if value is not None and not isinstance(value, str):
             raise UsageError(f"{path}: {key} 必须是字符串")
     for key, value in (("session_id", session_id), ("project_id", project_id),
@@ -143,6 +148,7 @@ def load_generation_params(workdir: str | Path | None, job: str) -> GenerationPa
         if value is not None and value < 0:
             raise UsageError(f"{path}: {key} 必须 >= 0")
     return GenerationParams(resolution=resolution, scale=scale,
+                            mode=mode, aspect_ratio=aspect_ratio,
                             session_id=session_id or None,
                             project_id=project_id or None,
                             episode=episode or None)
@@ -157,6 +163,10 @@ def save_generation_params(workdir: str | Path | None, job: str,
         lines.append(_toml_str("resolution", params.resolution))
     if params.scale is not None:
         lines.append(_toml_str("scale", params.scale))
+    if params.mode is not None:
+        lines.append(_toml_str("mode", params.mode))
+    if params.aspect_ratio is not None:
+        lines.append(_toml_str("aspect_ratio", params.aspect_ratio))
     if params.session_id:
         lines.append(f"session_id = {int(params.session_id)}")
     if params.project_id:
