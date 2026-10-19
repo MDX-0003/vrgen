@@ -285,6 +285,21 @@ def test_build_generate_argv_auto_aspect_omits_the_flag():
     assert "--aspect-ratio" in argv and "21:9" in argv
 
 
+def test_build_generate_argv_passes_project_session_id():
+    argv = task_mod.build_generate_argv(
+        prompt="p", model_id=37, mode="videoEdit", duration_s=13,
+        resolution="1080p", aspect_ratio="auto", num=1, upload="up.mp4",
+        video_asset_id=11, session_id=2060150528006080)
+    joined = " ".join(argv)
+    assert "--session-id 2060150528006080" in joined
+
+    argv = task_mod.build_generate_argv(
+        prompt="p", model_id=37, mode="videoEdit", duration_s=13,
+        resolution="1080p", aspect_ratio="auto", num=1, upload="up.mp4",
+        video_asset_id=11, session_id=0)
+    assert "--session-id" not in argv
+
+
 def test_task_id_and_state_extraction_tolerate_nesting():
     assert task_mod.extract_task_id({"taskId": 5}) == 5
     assert task_mod.extract_task_id({"results": [{"taskAssetIds": [1], "taskId": 8}]}) == 8

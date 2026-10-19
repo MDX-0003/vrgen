@@ -27,6 +27,7 @@ _FALLBACK: dict = {
         "aspect_ratio": "21:9",
         "num": 1,
         "keep_original_sound": True,
+        "session_id": 0,
         "scale": "auto",
         "upload_crf": 16,
         "prompt_template": "360-closure",
@@ -153,6 +154,8 @@ def _validate(data: dict) -> None:
         raise ConfigError("mglc.num must be in 1..4 (the platform's own limit)")
     if not isinstance(mglc["keep_original_sound"], bool):
         raise ConfigError("mglc.keep_original_sound must be true or false")
+    if int(mglc.get("session_id", 0)) < 0:
+        raise ConfigError("mglc.session_id must be >= 0 (0 means personal quota)")
     if int(mglc["duration_s"]) < 0:
         raise ConfigError("mglc.duration_s must be >= 0 (0 means 'derive from the input')")
     if ":" not in str(mglc["aspect_ratio"]):

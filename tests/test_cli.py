@@ -184,7 +184,7 @@ def test_params_show_reports_both_resolution_kinds(tmp_path, monkeypatch):
     assert sizes["auto"] == (4400, 1884, True)
     assert sizes["full"] == (4668, 2000, False)       # 像素和体积都超限
     assert sizes["half"] == (2334, 1000, True)
-    assert data["current"] == {"resolution": "1080p", "scale": "auto"}
+    assert data["current"] == {"resolution": "1080p", "scale": "auto", "session_id": 0}
     assert data["fixed"]["duration_s"] == 8
     assert data["saved"] is False
 
@@ -196,15 +196,38 @@ def test_params_save_roundtrips_through_show(tmp_path, monkeypatch):
                             "--resolution", "720p", "--scale", "half",
                             "--workdir", wd])
     assert r.exit_code == 0, r.output
-    assert json.loads(r.output) == {"resolution": "720p", "scale": "half"}
+    assert json.loads(r.output) == {"resolution": "720p", "scale": "half",
+                                    "session_id": 0}
     assert jobs.generation_params_path(tmp_path, "j1").is_file()
 
     r = runner.invoke(app, ["params", "show", "--job", "j1",
                             "--input", str(input), "--canvas", "4668x2000",
                             "--source", "4000x2000", "--workdir", wd])
     data = json.loads(r.output)
-    assert data["current"] == {"resolution": "720p", "scale": "half"}
+    assert data["current"] == {"resolution": "720p", "scale": "half",
+                               "session_id": 0}
     assert data["saved"] is True
+
+
+def test_params_save_persists_project_session_id(tmp_path, monkeypatch):
+    input = _params_offline(tmp_path, monkeypatch)
+    wd = str(tmp_path)
+    r = runner.invoke(app, ["params", "save", "--job", "j1",
+                            "--resolution", "1080p", "--scale", "auto",
+                            "--session-id", "2060150528006080", "--workdir", wd])
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["session_id"] == 2060150528006080
+
+    r = runner.invoke(app, ["params", "show", "--job", "j1",
+                            "--input", str(input), "--canvas", "1920x1052",
+                            "--source", "1920x1052", "--workdir", wd])
+    data = json.loads(r.output)
+    assert data["current"]["session_id"] == 2060150528006080
+    # 不传 session-id 再保存，保留已有会话
+    r = runner.invoke(app, ["params", "save", "--job", "j1",
+                            "--resolution", "720p", "--scale", "half",
+                            "--workdir", wd])
+    assert json.loads(r.output)["session_id"] == 2060150528006080
 
 
 def test_params_show_aspect_auto_is_reported_for_gen(tmp_path, monkeypatch):

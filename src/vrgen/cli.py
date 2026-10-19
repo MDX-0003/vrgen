@@ -54,12 +54,14 @@ def _root(
 
 
 def _apply_generation_params(conf, workdir, job, *, model_id, mode, resolution,
-                             duration, num, aspect_ratio, scale) -> None:
+                             duration, num, aspect_ratio, scale, session_id=None) -> None:
     """Resolve submit parameters: CLI > generation.toml > config.
 
     Every option except ``scale`` maps one-to-one onto a ``mglc video generate``
     flag (``--mode`` is mglc ``--type``). ``scale`` is vrgen's own upload
     decision and has no mglc counterpart; it changes the prompt geometry.
+    ``session_id`` selects a project generation session, so the spend is billed
+    to that project's balance instead of the personal one.
     """
     saved = jobs.load_generation_params(workdir, job)
     picks = {
@@ -70,6 +72,7 @@ def _apply_generation_params(conf, workdir, job, *, model_id, mode, resolution,
         "num": num,
         "aspect_ratio": aspect_ratio,
         "scale": scale if scale is not None else saved.scale,
+        "session_id": session_id if session_id is not None else saved.session_id,
     }
     for key, value in picks.items():
         if value is not None:
@@ -98,6 +101,8 @@ def _apply_generation_params(conf, workdir, job, *, model_id, mode, resolution,
         raise UsageError("--scale 只能是 auto | full | half")
     if saved.scale is not None and saved.scale not in params_mod.INPUT_MODES:
         raise UsageError(f"generation.toml: scale {saved.scale!r} 不合法")
+    if int(conf.get("mglc.session_id", 0)) < 0:
+        raise UsageError("--session-id 必须 >= 0（0 = 个人额度）")
 
 
 def _parse_kv(items: list[str] | None) -> dict[str, str]:
@@ -150,6 +155,9 @@ def submit(
                                       help="← mglc --aspect-ratio；fullredraw 固定 21:9。"),
     scale: str = typer.Option(None, "--scale",
                               help="vrgen 自有上传缩放：auto|full|half（无 mglc 对应 flag）。"),
+    session_id: int = typer.Option(
+        None, "--session-id",
+        help="项目生成会话 ID（>0）：在该项目的额度下提交；0 = 个人额度。"),
     dry_run: bool = typer.Option(False, "--dry-run",
                                   help="只做本地半场（缩档+提示词+台账），不发请求不花钱。"),
     workdir: Path = typer.Option(None, "--workdir",
@@ -163,7 +171,7 @@ def submit(
         _apply_generation_params(
             conf, workdir, job, model_id=model_id, mode=mode,
             resolution=resolution, duration=duration, num=num,
-            aspect_ratio=aspect_ratio, scale=scale,
+            aspect_ratio=aspect_ratio, scale=scale, session_id=session_id,
         )
         canvas_size = _parse_wh(canvas, "--canvas")
         source_size = _parse_wh(source, "--source")
@@ -438,6 +446,7 @@ def params_show(
             "current": {
                 "resolution": str(conf.get("mglc.resolution")),
                 "scale": str(conf.get("mglc.scale")),
+                "session_id": int(conf.get("mglc.session_id", 0)),
             },
             "fixed": {
                 "model_id": model.code,
@@ -460,6 +469,9 @@ def params_save(
                                    help="输出档位：480p | 720p | 1080p。"),
     scale: str = typer.Option(..., "--scale",
                               help="输入缩放：auto | full | half。"),
+    session_id: int = typer.Option(
+        None, "--session-id",
+        help="项目生成会话 ID（>0）；0 = 个人额度；不传 = 保留已有设置。"),
     workdir: Path = typer.Option(None, "--workdir", help="台账根（默认 $VRGEN_RUNS_DIR）。"),
 ) -> None:
     """保存 job 级生成参数草稿（写 runs/<job>/generation.toml）。"""
@@ -468,12 +480,19 @@ def params_save(
             raise UsageError("resolution 只能是 480p | 720p | 1080p")
         if scale not in params_mod.INPUT_MODES:
             raise UsageError("scale 只能是 auto | full | half")
+        if session_id is not None and session_id < 0:
+            raise UsageError("session-id 必须 >= 0")
+        saved = jobs.load_generation_params(workdir, job)
+        if session_id is None:
+            session_id = saved.session_id
         jobs.save_generation_params(
             workdir, job,
-            jobs.GenerationParams(resolution=resolution, scale=scale))
+            jobs.GenerationParams(resolution=resolution, scale=scale,
+                                  session_id=session_id))
     except VrgenError as exc:
         _fail(exc)
-    _echo_payload({"resolution": resolution, "scale": scale})
+    _echo_payload({"resolution": resolution, "scale": scale,
+                   "session_id": session_id or 0})
 
 
 # ── manual 后端（M3）─────────────────────────────────────────────────────

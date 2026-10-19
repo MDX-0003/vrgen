@@ -140,6 +140,7 @@ def prepare_round(conf, pkg: InputPackage, *, log) -> Prepared:
         "duration_s": _duration_s(conf, spec),
         "aspect_ratio": str(conf.get("mglc.aspect_ratio")),
         "num": int(conf.get("mglc.num", 1)),
+        "session_id": int(conf.get("mglc.session_id", 0)),
         "scale": f"{upload_size[0]}x{upload_size[1]}",
         # Not cosmetic: without it the model returns a silent file and recompose,
         # which copies the audio of what came back, delivers a silent panorama.

@@ -43,6 +43,7 @@ def build_generate_argv(*, prompt: str, model_id: int, mode: str, duration_s: in
                         upload: str | Path, mask: str | Path | None = None,
                         video_asset_id: int | None = None,
                         image_asset_id: int | None = None,
+                        session_id: int | None = None,
                         keep_sound: bool = True,
                         preview: bool = False) -> list[str]:
     """The ``mglc video generate`` arguments for one round.
@@ -81,6 +82,9 @@ def build_generate_argv(*, prompt: str, model_id: int, mode: str, duration_s: in
                             "reference video; run `vrpad aigc assets` first")
         video_asset_id = "<video-asset-id>"
     argv += ["--video-asset-id", str(video_asset_id)]
+    if session_id:
+        # 项目生成会话：平台的计费上下文跟随会话，额度走项目而不是个人。
+        argv += ["--session-id", str(int(session_id))]
     if mask is not None:
         argv += ["--image", str(mask)]
         if image_asset_id is None:
@@ -140,6 +144,7 @@ def submit(client: Mglc, run: Run, *, confirm: bool = False, timeout: float = 30
         video_asset_id=run.assets.get("video"),
         image_asset_id=run.assets.get("image"),
         keep_sound=bool(run.params.get("keep_sound", True)),
+        session_id=int(run.params.get("session_id", 0) or 0),
     )
     write_command(run, [client.exe(), "video", "generate", *argv], spend=True)
     if log is not None:
