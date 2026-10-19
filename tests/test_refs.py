@@ -109,4 +109,7 @@ def test_counts_and_prompt_block(tmp_path):
     assert interleaved.index("@Video2") < interleaved.index("@Image1")
     assert master(refs).id == "v1"
     assert mode_variables("videoEdit")["timeline_rule"].startswith("动作顺序")
-    assert "重新生成完整表演" in mode_variables("allMediaRef")["task_rule"]
+    all_media = mode_variables("allMediaRef")
+    assert "重新生成完整表演" in all_media["task_rule"]
+    assert "不必逐秒" in all_media["timeline_rule"]
+    assert "迈步" in all_media["timeline_rule"]
