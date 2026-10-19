@@ -15,7 +15,7 @@ from vrgen.prep.budget import InputSpec
 runner = CliRunner()
 
 REAL_COMMANDS = {"register", "status", "result", "submit", "login", "models",
-                 "peek", "prompt", "params"}
+                 "peek", "prompt", "params", "sessions"}
 
 
 def test_help_lists_the_contract_surface():
@@ -184,7 +184,8 @@ def test_params_show_reports_both_resolution_kinds(tmp_path, monkeypatch):
     assert sizes["auto"] == (4400, 1884, True)
     assert sizes["full"] == (4668, 2000, False)       # 像素和体积都超限
     assert sizes["half"] == (2334, 1000, True)
-    assert data["current"] == {"resolution": "1080p", "scale": "auto", "session_id": 0}
+    assert data["current"] == {"resolution": "1080p", "scale": "auto",
+                               "session_id": 0, "project_id": 0, "episode": 0}
     assert data["fixed"]["duration_s"] == 8
     assert data["saved"] is False
 
@@ -197,7 +198,7 @@ def test_params_save_roundtrips_through_show(tmp_path, monkeypatch):
                             "--workdir", wd])
     assert r.exit_code == 0, r.output
     assert json.loads(r.output) == {"resolution": "720p", "scale": "half",
-                                    "session_id": 0}
+                                    "session_id": 0, "project_id": 0, "episode": 0}
     assert jobs.generation_params_path(tmp_path, "j1").is_file()
 
     r = runner.invoke(app, ["params", "show", "--job", "j1",
@@ -205,8 +206,36 @@ def test_params_save_roundtrips_through_show(tmp_path, monkeypatch):
                             "--source", "4000x2000", "--workdir", wd])
     data = json.loads(r.output)
     assert data["current"] == {"resolution": "720p", "scale": "half",
-                               "session_id": 0}
+                               "session_id": 0, "project_id": 0, "episode": 0}
     assert data["saved"] is True
+
+
+def test_params_save_persists_project_and_episode_for_the_ui(tmp_path, monkeypatch):
+    input = _params_offline(tmp_path, monkeypatch)
+    wd = str(tmp_path)
+    r = runner.invoke(app, ["params", "save", "--job", "j1",
+                            "--resolution", "1080p", "--scale", "auto",
+                            "--session-id", "2060150528006080",
+                            "--project-id", "2060150527854528",
+                            "--episode", "1", "--workdir", wd])
+    assert r.exit_code == 0, r.output
+    echo = json.loads(r.output)
+    assert echo["project_id"] == 2060150527854528 and echo["episode"] == 1
+
+    r = runner.invoke(app, ["params", "show", "--job", "j1",
+                            "--input", str(input), "--canvas", "1920x1052",
+                            "--source", "1920x1052", "--workdir", wd])
+    current = json.loads(r.output)["current"]
+    assert current["session_id"] == 2060150528006080
+    assert current["project_id"] == 2060150527854528
+    assert current["episode"] == 1
+
+    # 切回个人额度：三项一起清空
+    r = runner.invoke(app, ["params", "save", "--job", "j1",
+                            "--resolution", "1080p", "--scale", "auto",
+                            "--session-id", "0", "--workdir", wd])
+    echo = json.loads(r.output)
+    assert (echo["session_id"], echo["project_id"], echo["episode"]) == (0, 0, 0)
 
 
 def test_params_save_persists_project_session_id(tmp_path, monkeypatch):

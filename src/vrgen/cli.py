@@ -16,6 +16,7 @@ import typer
 
 from . import __version__, jobs, manual
 from . import config as config_mod
+from . import sessions as sessions_mod
 from .errors import TaskFailed, UsageError, VrgenError
 from .paths import templates_dir
 from .platform.client import Mglc
@@ -224,6 +225,7 @@ def submit(
         video_asset_id=prepared.run.assets.get("video"),
         image_asset_id=prepared.run.assets.get("image"),
         keep_sound=bool(prepared.run.params.get("keep_sound", True)),
+        session_id=int(prepared.run.params.get("session_id", 0) or 0),
         preview=True)])
     print(f"\ncommand     {command}")
 
@@ -341,6 +343,34 @@ def peek(task_id: int = typer.Argument(..., help="平台任务 id（零额度查
           f"(known: {TASK_STATES.get(code, code)})")
 
 
+# ── 项目/剧集/生成会话（只读，web 会话选择器的数据源）────────────────────
+
+sessions_app = typer.Typer(
+    help="项目/剧集/生成会话：只读查询，JSON 输出（契约 case-model.md §4）。",
+    no_args_is_help=True,
+)
+app.add_typer(sessions_app, name="sessions")
+
+
+@sessions_app.command("list")
+def sessions_list(
+    project_id: int = typer.Option(None, "--project-id", help="只展开这个项目。"),
+    episode: int = typer.Option(None, "--episode",
+                                help="只展开这一集；必须与 --project-id 一起给。"),
+    config: Path = typer.Option(None, "--config", help="TOML 配置文件。"),
+) -> None:
+    """列出项目/剧集/生成会话树（只读命令，不消耗额度）。"""
+    from .platform.binpath import find_mglc
+
+    try:
+        conf = config_mod.load(config)
+        client = Mglc(config=conf, binary=find_mglc(conf))
+        payload = sessions_mod.tree(client, project_id=project_id, episode=episode)
+    except VrgenError as exc:
+        _fail(exc)
+    _echo_payload(payload)
+
+
 # ── 提示词模板与变量草稿（web 提示词编辑界面的数据源，决策 18）────────────
 
 prompt_app = typer.Typer(
@@ -435,6 +465,7 @@ def params_show(
             raise UsageError(f"model {model.code} mode {limits.mode} 不接受输入视频")
         spec = probe_input(input, conf)
         duration_s = int(conf.get("mglc.duration_s")) or params_mod.derived_duration(spec)
+        saved = jobs.load_generation_params(workdir, job)
         outputs = params_mod.output_options(canvas_size[0] / canvas_size[1])
         if limits.resolutions:
             outputs = [o for o in outputs if o["value"] in limits.resolutions]
@@ -447,6 +478,8 @@ def params_show(
                 "resolution": str(conf.get("mglc.resolution")),
                 "scale": str(conf.get("mglc.scale")),
                 "session_id": int(conf.get("mglc.session_id", 0)),
+                "project_id": saved.project_id or 0,
+                "episode": saved.episode or 0,
             },
             "fixed": {
                 "model_id": model.code,
@@ -472,6 +505,10 @@ def params_save(
     session_id: int = typer.Option(
         None, "--session-id",
         help="项目生成会话 ID（>0）；0 = 个人额度；不传 = 保留已有设置。"),
+    project_id: int = typer.Option(
+        None, "--project-id", help="会话所属项目 ID（仅用于页面回显）。"),
+    episode: int = typer.Option(
+        None, "--episode", help="会话所属剧集序号（仅用于页面回显）。"),
     workdir: Path = typer.Option(None, "--workdir", help="台账根（默认 $VRGEN_RUNS_DIR）。"),
 ) -> None:
     """保存 job 级生成参数草稿（写 runs/<job>/generation.toml）。"""
@@ -482,17 +519,38 @@ def params_save(
             raise UsageError("scale 只能是 auto | full | half")
         if session_id is not None and session_id < 0:
             raise UsageError("session-id 必须 >= 0")
+        if project_id is not None and project_id < 0:
+            raise UsageError("project-id 必须 >= 0")
+        if episode is not None and episode < 0:
+            raise UsageError("episode 必须 >= 0")
         saved = jobs.load_generation_params(workdir, job)
         if session_id is None:
+            if project_id is not None or episode is not None:
+                raise UsageError("改项目/剧集时请同时给 --session-id")
             session_id = saved.session_id
+            project_id = saved.project_id
+            episode = saved.episode
+        elif session_id == 0:
+            project_id = episode = 0
+        else:
+            if project_id is None:
+                project_id = saved.project_id
+            if episode is None:
+                episode = saved.episode
+            if episode and not project_id:
+                raise UsageError("给了 --episode 就必须给 --project-id")
         jobs.save_generation_params(
             workdir, job,
             jobs.GenerationParams(resolution=resolution, scale=scale,
-                                  session_id=session_id))
+                                  session_id=session_id or None,
+                                  project_id=project_id or None,
+                                  episode=episode or None))
     except VrgenError as exc:
         _fail(exc)
     _echo_payload({"resolution": resolution, "scale": scale,
-                   "session_id": session_id or 0})
+                   "session_id": session_id or 0,
+                   "project_id": project_id or 0,
+                   "episode": episode or 0})
 
 
 # ── manual 后端（M3）─────────────────────────────────────────────────────

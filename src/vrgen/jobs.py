@@ -115,6 +115,8 @@ class GenerationParams:
     resolution: str | None = None   # mglc 输出档位 480p/720p/1080p
     scale: str | None = None        # vrgen 上传缩放 auto/full/half
     session_id: int | None = None   # >0 = 项目生成会话；计费走项目额度
+    project_id: int | None = None   # 仅用于页面回显会话所属项目
+    episode: int | None = None      # 仅用于页面回显会话所属剧集
 
 
 def generation_params_path(workdir: str | Path | None, job: str) -> Path:
@@ -129,14 +131,21 @@ def load_generation_params(workdir: str | Path | None, job: str) -> GenerationPa
     resolution = data.get("resolution")
     scale = data.get("scale")
     session_id = data.get("session_id")
+    project_id = data.get("project_id")
+    episode = data.get("episode")
     for key, value in (("resolution", resolution), ("scale", scale)):
         if value is not None and not isinstance(value, str):
             raise UsageError(f"{path}: {key} 必须是字符串")
-    if session_id is not None and (isinstance(session_id, bool)
-                                   or not isinstance(session_id, int)):
-        raise UsageError(f"{path}: session_id 必须是整数")
+    for key, value in (("session_id", session_id), ("project_id", project_id),
+                       ("episode", episode)):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+            raise UsageError(f"{path}: {key} 必须是整数")
+        if value is not None and value < 0:
+            raise UsageError(f"{path}: {key} 必须 >= 0")
     return GenerationParams(resolution=resolution, scale=scale,
-                            session_id=session_id or None)
+                            session_id=session_id or None,
+                            project_id=project_id or None,
+                            episode=episode or None)
 
 
 def save_generation_params(workdir: str | Path | None, job: str,
@@ -150,6 +159,10 @@ def save_generation_params(workdir: str | Path | None, job: str,
         lines.append(_toml_str("scale", params.scale))
     if params.session_id:
         lines.append(f"session_id = {int(params.session_id)}")
+    if params.project_id:
+        lines.append(f"project_id = {int(params.project_id)}")
+    if params.episode:
+        lines.append(f"episode = {int(params.episode)}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
 

@@ -145,6 +145,16 @@ class Mglc:
             args += ["--type", kind]
         return self.call(*args)
 
+    def project_list(self) -> Envelope:
+        return self.call("project", "list")
+
+    def episode_list(self, project_id: int) -> Envelope:
+        return self.call("episode", "list", "--project-id", str(int(project_id)))
+
+    def session_list(self, project_id: int, episode: int) -> Envelope:
+        return self.call("session", "list", "--project-id", str(int(project_id)),
+                         "--episode", str(int(episode)))
+
     def task_status(self, task_id: int) -> Envelope:
         return self.call("task", "status", "--task-id", str(int(task_id)))
 
