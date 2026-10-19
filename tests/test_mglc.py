@@ -270,6 +270,21 @@ def test_build_generate_argv_requires_asset_ids():
     assert "--keep-original-sound" in joined
 
 
+def test_build_generate_argv_auto_aspect_omits_the_flag():
+    """videoEdit 的 ratios 为空、输出跟随输入；auto 表示不向 mglc 传该 flag。"""
+    argv = task_mod.build_generate_argv(
+        prompt="p", model_id=37, mode="videoEdit", duration_s=13,
+        resolution="1080p", aspect_ratio="auto", num=1, upload="up.mp4",
+        video_asset_id=11)
+    assert "--aspect-ratio" not in argv
+
+    argv = task_mod.build_generate_argv(
+        prompt="p", model_id=37, mode="videoEdit", duration_s=13,
+        resolution="1080p", aspect_ratio="21:9", num=1, upload="up.mp4",
+        video_asset_id=11)
+    assert "--aspect-ratio" in argv and "21:9" in argv
+
+
 def test_task_id_and_state_extraction_tolerate_nesting():
     assert task_mod.extract_task_id({"taskId": 5}) == 5
     assert task_mod.extract_task_id({"results": [{"taskAssetIds": [1], "taskId": 8}]}) == 8

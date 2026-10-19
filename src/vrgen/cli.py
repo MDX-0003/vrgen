@@ -89,8 +89,11 @@ def _apply_generation_params(conf, workdir, job, *, model_id, mode, resolution,
         raise UsageError("--duration 必须 >= 4（0 表示按输入时长自动取整）")
     if not 1 <= int(conf.get("mglc.num")) <= 4:
         raise UsageError("--num 必须在 1..4")
-    if ":" not in str(conf.get("mglc.aspect_ratio")):
-        raise UsageError("--aspect-ratio 必须是 W:H（如 21:9）")
+    if not str(conf.get("mglc.aspect_ratio")).strip():
+        raise UsageError("--aspect-ratio 不能为空（写 W:H 如 21:9；videoEdit 跟随输入时写 auto）")
+    aspect = str(conf.get("mglc.aspect_ratio")).strip()
+    if aspect != "auto" and ":" not in aspect:
+        raise UsageError("--aspect-ratio 必须是 W:H（如 21:9），或 auto 表示跟随输入")
     if scale is not None and scale not in params_mod.INPUT_MODES:
         raise UsageError("--scale 只能是 auto | full | half")
     if saved.scale is not None and saved.scale not in params_mod.INPUT_MODES:
@@ -399,6 +402,9 @@ def params_show(
                                help="送生成的视频（用于计算 auto 输入尺寸）。"),
     canvas: str = typer.Option(..., "--canvas", help="画布尺寸 WxH。"),
     source: str = typer.Option(..., "--source", help="源尺寸 WxH（冗余带宽度来源）。"),
+    aspect_ratio: str = typer.Option(
+        None, "--aspect-ratio",
+        help="覆盖 fixed 里的输出比例；auto 表示跟随输入（gen 流用）。"),
     config: Path = typer.Option(None, "--config", help="TOML 配置文件。"),
     workdir: Path = typer.Option(None, "--workdir", help="台账根（默认 $VRGEN_RUNS_DIR）。"),
 ) -> None:
@@ -407,7 +413,7 @@ def params_show(
         conf = config_mod.load(config)
         _apply_generation_params(
             conf, workdir, job, model_id=None, mode=None, resolution=None,
-            duration=None, num=None, aspect_ratio=None, scale=None,
+            duration=None, num=None, aspect_ratio=aspect_ratio, scale=None,
         )
         canvas_size = _parse_wh(canvas, "--canvas")
         _parse_wh(source, "--source")

@@ -207,6 +207,26 @@ def test_params_save_roundtrips_through_show(tmp_path, monkeypatch):
     assert data["saved"] is True
 
 
+def test_params_show_aspect_auto_is_reported_for_gen(tmp_path, monkeypatch):
+    input = _params_offline(tmp_path, monkeypatch)
+    r = runner.invoke(app, ["params", "show", "--job", "j1",
+                            "--input", str(input), "--canvas", "1920x1052",
+                            "--source", "1920x1052", "--aspect-ratio", "auto",
+                            "--workdir", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    data = json.loads(r.output)
+    assert data["fixed"]["aspect_ratio"] == "auto"
+    assert {o["value"] for o in data["output"]} == {"480p", "720p", "1080p"}
+
+
+def test_gen_edit_template_is_available_and_needs_its_variables():
+    from vrgen.paths import templates_dir
+    text = (templates_dir() / "gen-edit.md").read_text(encoding="utf-8")
+    for key in ("subject", "target", "plot", "preserve", "allowed_changes"):
+        assert "{" + key + "}" in text
+    assert "{theme}" not in text
+
+
 def test_params_save_rejects_values_outside_the_ui_set(tmp_path):
     for args in (["--resolution", "4K", "--scale", "auto"],
                  ["--resolution", "720p", "--scale", "quarter"]):

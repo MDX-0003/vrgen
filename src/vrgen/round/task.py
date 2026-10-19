@@ -68,9 +68,11 @@ def build_generate_argv(*, prompt: str, model_id: int, mode: str, duration_s: in
             "--type", str(mode),
             "--duration", str(int(duration_s)),
             "--resolution", str(resolution),
-            "--aspect-ratio", str(aspect_ratio),
             "--num", str(int(num)),
             "--video", str(upload)]
+    # videoEdit 的输出比例跟随输入（模型详情里 ratios 为空）；"auto" 表示不传该 flag。
+    if str(aspect_ratio).strip().lower() != "auto":
+        argv += ["--aspect-ratio", str(aspect_ratio)]
     if keep_sound:
         argv.append("--keep-original-sound")
     if video_asset_id is None:
