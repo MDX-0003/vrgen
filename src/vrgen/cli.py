@@ -245,7 +245,17 @@ def submit(
         session_id=int(prepared.run.params.get("session_id", 0) or 0),
         preview=True)
     ledger_refs = prepared.run.params.get("refs") or []
-    if ledger_refs:
+    if ledger_refs and str(prepared.run.params.get("mode")) == "firstLastFrame":
+        by_role = {str(item.get("role")): item for item in ledger_refs}
+        first = by_role.get("first_frame")
+        last = by_role.get("last_frame")
+        if first is None or last is None:
+            raise UsageError("firstLastFrame 台账缺 first_frame 或 last_frame")
+        gen_argv = build_generate_argv(
+            **common,
+            first_image=(str(first["upload"]), None),
+            last_image=(str(last["upload"]), None))
+    elif ledger_refs:
         videos = [(str(item["upload"]),
                    prepared.run.assets.get(f"video:{item['id']}"))
                   for item in ledger_refs if item.get("kind") == "video"]
@@ -543,8 +553,6 @@ def params_show(
                              log=Log(quiet=True))
         model = find_model(models, int(conf.get("mglc.model_id")))
         limits = model.mode(str(conf.get("mglc.mode")))
-        if not limits.takes_video:
-            raise UsageError(f"model {model.code} mode {limits.mode} 不接受输入视频")
         saved = jobs.load_generation_params(workdir, job)
         aspect = params_mod.effective_aspect(str(conf.get("mglc.aspect_ratio")),
                                              limits.ratios)
@@ -555,15 +563,15 @@ def params_show(
                 "takes_video": m.takes_video,
                 "ratios": list(m.ratios),
                 "max_count": m.max_count,
-                "max_videos": getattr(m, "max_videos", 0),
+                "max_videos": (getattr(m, "max_videos", 0) if m.takes_video else 0),
                 "max_images": getattr(m, "max_images", 0),
-                "video_required": True,
+                "video_required": m.mode in ("videoEdit", "videoExtend"),
                 "roles": {kind: list(roles) for kind, roles in
                           params_mod.MODE_ROLES.get(m.mode, {}).items()},
                 "duration": dict(m.duration or {}),
             }
             for m in model.modes.values()
-            if m.takes_video and m.mode in params_mod.SUPPORTED_MODES
+            if m.mode in params_mod.SUPPORTED_MODES
         ]
         common = {
             "job": job,
@@ -587,6 +595,10 @@ def params_show(
         if input is None:
             payload = {"output": [], "input": [], **common}
         else:
+            if not limits.takes_video:
+                raise UsageError(
+                    f"model {model.code} mode {limits.mode} 不接受输入视频；"
+                    "firstLastFrame 请用 --refs 提交首尾帧")
             if canvas is None or source is None:
                 raise UsageError("给了 --input 就要同时给 --canvas 与 --source")
             canvas_size = _parse_wh(canvas, "--canvas")
@@ -621,7 +633,8 @@ def params_save(
     scale: str = typer.Option(None, "--scale",
                               help="输入缩放：auto | full | half；省略保留已有值。"),
     mode: str = typer.Option(
-        None, "--mode", help="生成模式（videoEdit/allMediaRef/videoExtend）；不传保留已有值。"),
+        None, "--mode",
+        help="生成模式（videoEdit/allMediaRef/videoExtend/firstLastFrame）；不传保留已有值。"),
     aspect_ratio: str = typer.Option(
         None, "--aspect-ratio", help="输出比例；auto = 跟随输入；不传保留已有值。"),
     session_id: int = typer.Option(

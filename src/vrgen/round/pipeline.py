@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import refs as refs_mod
-from ..errors import AigcError, BudgetError, LedgerError, TaskFailed
+from ..errors import AigcError, BudgetError, LedgerError, TaskFailed, UsageError
 from ..paths import sha256_16, templates_dir
 from ..platform.client import Mglc
 from ..platform.media import (
@@ -115,6 +115,39 @@ def _duration_s(conf, spec: InputSpec) -> int:
         return configured
     seconds = spec.duration_s if spec.duration_s > 0 else 0.0
     return max(4, int(seconds) + (1 if seconds % 1 else 0))
+
+
+def _duration_range(limits: ModeLimits) -> tuple[int, int] | None:
+    duration = dict(limits.duration or {})
+    if duration.get("type") != "range":
+        return None
+    try:
+        return int(duration["min"]), int(duration["max"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _gen_duration(conf, limits: ModeLimits, *, source: str,
+                  master_spec: InputSpec,
+                  planned: list[tuple[refs_mod.RefAsset, InputSpec, tuple[int, int], bool]]
+                  ) -> tuple[int, str]:
+    """Resolve a refs round's duration: explicit > longest video > default 4."""
+    configured = int(conf.get("mglc.duration_s", 0) or 0)
+    if configured:
+        span = _duration_range(limits)
+        if span is not None and not span[0] <= configured <= span[1]:
+            raise UsageError(
+                f"--duration {configured} 超出模式 {limits.mode} 的合法区间 "
+                f"{span[0]}-{span[1]} 秒")
+        return configured, source
+    if source == "longest":
+        videos = [p[1] for p in planned if p[0].kind == "video"]
+        if videos:
+            return _duration_s(conf, max(videos, key=lambda spec: spec.duration_s)), source
+        return 4, "none"
+    if source == "none":
+        return 4, "none"
+    return _duration_s(conf, master_spec), source
 
 
 def _parse_wh(text: str, what: str) -> tuple[int, int]:
@@ -238,22 +271,20 @@ def _prepare_gen(conf, pkg: InputPackage, *, log) -> Prepared:
                          max_age_h=float(conf.get("mglc.models_max_age_h", 24.0)), log=log)
     model = find_model(models, int(conf.get("mglc.model_id")))
     limits = model.mode(str(conf.get("mglc.mode")))
-    if not limits.takes_video:
-        raise AigcError(f"model {model.code} mode {limits.mode!r} 不接受输入视频")
     refs_mod.validate_mode(pkg.refs, limits.mode)
     refs_mod.validate_counts(pkg.refs, limits.mode,
                              max_videos=limits.max_videos,
                              max_images=limits.max_images)
     aspect = effective_aspect(str(conf.get("mglc.aspect_ratio")), limits.ratios)
     if not limits.ratios:
-        # videoEdit / videoExtend 的输出比例跟随输入；auto = 不向 mglc 传该 flag。
+        # videoEdit / videoExtend / firstLastFrame 的输出比例跟随输入；auto = 不传该 flag。
         aspect = "auto"
     if limits.ratios and aspect not in limits.ratios:
         raise AigcError(
             f"mode {limits.mode} 只接受这些输出比例：{', '.join(limits.ratios)}；"
             f"当前是 {aspect!r}")
 
-    video_validator = limits.ref_video_limits()
+    video_validator = limits.ref_video_limits() if limits.takes_video else {}
     image_validator = limits.ref_image_limits()
     mode_name, explicit = parse_size_mode(str(conf.get("mglc.scale")))
     if explicit and sum(1 for a in pkg.refs if a.kind == "video") > 1:
@@ -307,6 +338,14 @@ def _prepare_gen(conf, pkg: InputPackage, *, log) -> Prepared:
 
     master_asset = refs_mod.master(pkg.refs)
     master_plan = next(p for p in planned if p[0].id == master_asset.id)
+    if limits.mode == "firstLastFrame":
+        first_plan = next(p for p in planned if p[0].role == "first_frame")
+        last_plan = next(p for p in planned if p[0].role == "last_frame")
+        if (first_plan[1].width, first_plan[1].height) != (last_plan[1].width, last_plan[1].height):
+            raise UsageError(
+                "firstLastFrame 的首帧与尾帧宽高必须一致："
+                f"{first_plan[1].width}x{first_plan[1].height} vs "
+                f"{last_plan[1].width}x{last_plan[1].height}")
     canvas = pkg.canvas_size or (master_plan[1].width, master_plan[1].height)
     source = pkg.source_size or canvas
     geometry = plain_geometry(canvas, master_plan[2])
@@ -316,10 +355,9 @@ def _prepare_gen(conf, pkg: InputPackage, *, log) -> Prepared:
     variables["asset_list"] = refs_mod.asset_list(pkg.refs)
     prompt = render(template_path.read_text(encoding="utf-8"), variables)
 
-    duration_ref = (master_plan if refs_mod.duration_source(limits.mode) == "master"
-                    else max((p for p in planned if p[0].kind == "video"),
-                             key=lambda p: p[1].duration_s))
-    duration_s = _duration_s(conf, duration_ref[1])
+    duration_source = refs_mod.duration_source(limits.mode)
+    duration_s, duration_source = _gen_duration(
+        conf, limits, source=duration_source, master_spec=master_plan[1], planned=planned)
 
     refs_params = []
     for asset, spec, upload_size, _needs_scale in planned:
@@ -345,15 +383,16 @@ def _prepare_gen(conf, pkg: InputPackage, *, log) -> Prepared:
         "num": int(conf.get("mglc.num", 1)),
         "session_id": int(conf.get("mglc.session_id", 0)),
         "scale": f"{master_plan[2][0]}x{master_plan[2][1]}",
-        "keep_sound": bool(conf.get("mglc.keep_original_sound", True)),
-        "input": str(master_asset.path),
+        "keep_sound": (bool(conf.get("mglc.keep_original_sound", True))
+                       and any(a.kind == "video" for a in pkg.refs)),
+        "input": str(master_asset.path) if master_asset.kind == "video" else None,
         "mask": None,
         "canvas": f"{canvas[0]}x{canvas[1]}",
         "source": f"{source[0]}x{source[1]}",
         "template": pkg.template,
         "refs": refs_params,
         "master": master_asset.id,
-        "duration_source": refs_mod.duration_source(limits.mode),
+        "duration_source": duration_source,
     }
 
     store = RunStore(pkg.workdir)
@@ -429,7 +468,10 @@ def execute_round(conf, pkg: InputPackage, prepared: Prepared, *, client: Mglc, 
     # recorded id would hurt (the account-switch -400 case).
     if run.task_id is None:
         ledger_refs = run.params.get("refs") or []
-        if ledger_refs:
+        if str(run.params.get("mode")) == "firstLastFrame":
+            # CLI 的 --first-image/--last-image 没有 asset-id 参数，首尾图按路径直传。
+            log.info("firstLastFrame：首尾图直传，跳过 SD 合规素材登记")
+        elif ledger_refs:
             items = [(f"{item['kind']}:{item['id']}", item["kind"], item["upload"])
                      for item in ledger_refs]
             outcome.assets = ensure_assets(

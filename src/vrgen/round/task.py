@@ -21,6 +21,7 @@ from __future__ import annotations
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +35,7 @@ TERMINAL_GOOD = 2
 TERMINAL_BAD = (3, 4)
 
 _TASK_ID_KEYS = ("taskid", "id")
-_URL_HINTS = (".mp4", ".mov", ".m4v")
+_URL_HINTS = (".mp4", ".mov", ".m4v", ".png", ".jpg", ".jpeg", ".webp")
 _WM_MARKERS = ("wm", "watermark", "watermarked")
 
 
@@ -46,17 +47,22 @@ def build_generate_argv(*, prompt: str, model_id: int, mode: str, duration_s: in
                         image_asset_id: int | None = None,
                         videos: list[tuple[str | Path, int | None]] | None = None,
                         images: list[tuple[str | Path, int | None]] | None = None,
+                        first_image: tuple[str | Path, int | None] | None = None,
+                        last_image: tuple[str | Path, int | None] | None = None,
                         session_id: int | None = None,
                         keep_sound: bool = True,
                         preview: bool = False) -> list[str]:
     """The ``mglc video generate`` arguments for one round.
 
-    Two input shapes share this builder:
+    Three input shapes share this builder:
 
     * ``upload`` / ``mask`` + ``*_asset_id`` -- the patch/fullredraw single-video
       path, kept for compatibility;
     * ``videos`` / ``images`` -- gen multi-asset lists, each ``(path, asset_id)``
-      in prompt order. The first video is the master.
+      in prompt order. The first video is the master;
+    * ``first_image`` / ``last_image`` -- firstLastFrame's two fixed frames. They
+      map to ``--first-image`` / ``--last-image`` and deliberately do not produce
+      ``--video`` / ``--image`` / ``--asset-id`` pairs.
 
     ``--duration`` is passed even for an editing task, where the platform reports
     ``duration.type = ""`` (i.e. the timeline is the input's): the CLI marks the flag
@@ -74,19 +80,33 @@ def build_generate_argv(*, prompt: str, model_id: int, mode: str, duration_s: in
     by the service, and finding that out from a human reading the command is cheaper
     than finding out from a failed task.
     """
-    if videos is None:
-        videos = [(upload, video_asset_id)] if upload is not None else []
-    if images is None:
-        images = [(mask, image_asset_id)] if mask is not None else []
-    if not videos:
-        raise AigcError("a generation round needs at least one reference video")
-
     argv = ["--prompt", prompt,
             "--model-id", str(int(model_id)),
             "--type", str(mode),
             "--duration", str(int(duration_s)),
             "--resolution", str(resolution),
             "--num", str(int(num))]
+
+    if mode == "firstLastFrame":
+        if videos or images or upload is not None or mask is not None:
+            raise AigcError("firstLastFrame only accepts first_image/last_image; "
+                            "video and ordinary image references are not allowed")
+        if first_image is None or last_image is None:
+            raise AigcError("firstLastFrame needs both a first frame and a last frame")
+        # 输出比例跟随首尾图；模型详情里该模式 ratios 为空，不传 --aspect-ratio。
+        argv += ["--first-image", str(first_image[0]),
+                 "--last-image", str(last_image[0])]
+        if session_id:
+            argv += ["--session-id", str(int(session_id))]
+        return argv
+
+    if videos is None:
+        videos = [(upload, video_asset_id)] if upload is not None else []
+    if images is None:
+        images = [(mask, image_asset_id)] if mask is not None else []
+    if not videos and not images:
+        raise AigcError("a generation round needs at least one reference video or image")
+
     # videoEdit 的输出比例跟随输入（模型详情里 ratios 为空）；"auto" 表示不传该 flag。
     if str(aspect_ratio).strip().lower() != "auto":
         argv += ["--aspect-ratio", str(aspect_ratio)]
@@ -152,20 +172,35 @@ def submit(client: Mglc, run: Run, *, confirm: bool = False, timeout: float = 30
         raise AigcError(f"run {run.key} has no prepared upload; run `vrgen submit` again")
     refs = run.params.get("refs") or []
     if refs:
-        videos = [(str(item["upload"]), run.assets.get(f"video:{item['id']}"))
-                  for item in refs if item.get("kind") == "video"]
-        images = [(str(item["upload"]), run.assets.get(f"image:{item['id']}"))
-                  for item in refs if item.get("kind") == "image"]
+        mode = str(run.params["mode"])
+        first_image = last_image = None
+        if mode == "firstLastFrame":
+            by_role = {str(item.get("role")): item for item in refs}
+            first = by_role.get("first_frame")
+            last = by_role.get("last_frame")
+            if first is None or last is None:
+                raise AigcError("firstLastFrame round is missing its first_frame or last_frame")
+            first_image = (str(first["upload"]), None)
+            last_image = (str(last["upload"]), None)
+            videos: list[tuple[str | Path, int | None]] = []
+            images: list[tuple[str | Path, int | None]] = []
+        else:
+            videos = [(str(item["upload"]), run.assets.get(f"video:{item['id']}"))
+                      for item in refs if item.get("kind") == "video"]
+            images = [(str(item["upload"]), run.assets.get(f"image:{item['id']}"))
+                      for item in refs if item.get("kind") == "image"]
         argv = build_generate_argv(
             prompt=run.prompt,
             model_id=int(run.params["model_id"]),
-            mode=str(run.params["mode"]),
+            mode=mode,
             duration_s=int(run.params["duration_s"]),
             resolution=str(run.params["resolution"]),
             aspect_ratio=str(run.params["aspect_ratio"]),
             num=int(run.params.get("num", 1)),
             videos=videos,
             images=images,
+            first_image=first_image,
+            last_image=last_image,
             keep_sound=bool(run.params.get("keep_sound", True)),
             session_id=int(run.params.get("session_id", 0) or 0),
         )
@@ -233,6 +268,24 @@ def wait(client: Mglc, task_id: int, *, interval: float = 20.0, timeout: float =
         time.sleep(interval)
 
 
+def _walk_url_values(node: Any, key: str = ""):
+    """Like ``walk_scalars`` but keeps the parent key for scalar list items.
+
+    Image payloads commonly return ``imgUrlList: ["https://…png", …]``; the shared
+    walker drops the key while descending into a list, and the URL itself still
+    identifies an image by suffix. Keeping the key here lets ``result_urls`` apply
+    the same image/video and watermark rules to list-shaped payloads.
+    """
+    if isinstance(node, Mapping):
+        for name, value in node.items():
+            yield from _walk_url_values(value, str(name))
+    elif isinstance(node, (list, tuple)):
+        for item in node:
+            yield from _walk_url_values(item, key)
+    else:
+        yield key, node
+
+
 def result_urls(data: Any) -> list[str]:
     """Result media URLs, watermarked variants last.
 
@@ -243,12 +296,12 @@ def result_urls(data: Any) -> list[str]:
     """
     plain: list[str] = []
     marked: list[str] = []
-    for key, value in walk_scalars(data):
+    for key, value in _walk_url_values(data):
         if not isinstance(value, str) or not value.startswith(("http://", "https://")):
             continue
         low_key, low_value = key.lower(), value.lower().split("?")[0]
         if not (any(low_value.endswith(ext) for ext in _URL_HINTS)
-                or "url" in low_key or "video" in low_key):
+                or "url" in low_key or "video" in low_key or "image" in low_key):
             continue
         bucket = marked if any(marker in low_key for marker in _WM_MARKERS) else plain
         bucket.append(value)

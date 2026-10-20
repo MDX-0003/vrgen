@@ -128,7 +128,7 @@ def test_prompt_show_renders_with_refs_and_geometry(tmp_path):
     assert data["render_error"] is None
     rendered = data["rendered"]
     assert "@Video1：空间参考" in rendered
-    assert "锁定参考视频的空间" in rendered
+    assert "锁定参考素材的空间" in rendered
     assert "1920×1052" in rendered
     assert "高官从起点走到终点" in rendered
     assert "{" not in rendered
@@ -233,6 +233,64 @@ def test_params_show_without_input_returns_modes_only(tmp_path, monkeypatch):
     assert data["output"] == [] and data["input"] == []
     assert data["modes"][0]["value"] == "videoEdit"
     assert "roles" in data["modes"][0]
+
+
+class _FirstLastLimits:
+    mode = "firstLastFrame"
+    takes_video = False
+    resolutions = ("480p", "720p", "1080p")
+    ratios = ()
+    max_count = 2
+    duration = {"type": "range", "min": 4, "max": 30}
+
+    def ref_image_limits(self):
+        return {"minPixel": 90000, "maxPixel": 36000000,
+                "maxBytes": 31457280, "maxCount": 2}
+
+
+class _FirstLastModel:
+    code = 37
+    modes = {"videoEdit": _Limits(), "firstLastFrame": _FirstLastLimits()}
+
+    def mode(self, name):
+        return self.modes[name]
+
+
+def test_params_show_first_last_frame_without_input(tmp_path, monkeypatch):
+    _params_offline(tmp_path, monkeypatch)
+    monkeypatch.setattr(vrgen_cli, "load_models",
+                        lambda *a, **kw: [_FirstLastModel()])
+    monkeypatch.setattr(vrgen_cli, "find_model",
+                        lambda models, code: _FirstLastModel())
+    jobs.save_generation_params(
+        tmp_path, "j1", jobs.GenerationParams(mode="firstLastFrame"))
+
+    r = runner.invoke(app, ["params", "show", "--job", "j1",
+                            "--workdir", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    data = json.loads(r.output)
+    assert data["current"]["mode"] == "firstLastFrame"
+    modes = {m["value"]: m for m in data["modes"]}
+    assert modes["firstLastFrame"]["takes_video"] is False
+    assert modes["firstLastFrame"]["video_required"] is False
+    assert modes["firstLastFrame"]["max_videos"] == 0
+    assert modes["firstLastFrame"]["duration"] == {"type": "range", "min": 4, "max": 30}
+
+
+def test_params_show_first_last_frame_rejects_input_video(tmp_path, monkeypatch):
+    input = _params_offline(tmp_path, monkeypatch)
+    monkeypatch.setattr(vrgen_cli, "load_models",
+                        lambda *a, **kw: [_FirstLastModel()])
+    monkeypatch.setattr(vrgen_cli, "find_model",
+                        lambda models, code: _FirstLastModel())
+    jobs.save_generation_params(
+        tmp_path, "j1", jobs.GenerationParams(mode="firstLastFrame"))
+
+    r = runner.invoke(app, ["params", "show", "--job", "j1",
+                            "--input", str(input), "--canvas", "1920x1080",
+                            "--source", "1920x1080", "--workdir", str(tmp_path)])
+    assert r.exit_code == 2, r.output
+    assert "不接受输入视频" in r.output
 
 
 def test_params_save_accepts_mode_only(tmp_path):

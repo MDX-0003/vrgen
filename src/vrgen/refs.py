@@ -18,14 +18,22 @@ from pathlib import Path
 from .errors import UsageError
 
 KINDS = ("video", "image")
-ROLES = ("edit_master", "motion_ref", "space_ref", "scene_ref", "subject_ref")
+ROLES = (
+    "edit_master", "motion_ref", "space_ref", "scene_ref", "subject_ref",
+    "first_frame", "last_frame", "mid_frame", "first_frame_raw", "last_frame_raw",
+)
 
 #: 本期支持的模式与允许的角色；与 vrstudio.case.MODE_ROLES 保持一致。
 MODE_ROLES: dict[str, dict[str, tuple[str, ...]]] = {
     "videoEdit": {"video": ("edit_master",), "image": ("subject_ref",)},
-    "allMediaRef": {"video": ("edit_master", "motion_ref", "space_ref", "scene_ref"),
-                    "image": ("subject_ref", "space_ref", "scene_ref")},
+    "allMediaRef": {
+        "video": ("edit_master", "motion_ref", "space_ref", "scene_ref"),
+        "image": ("subject_ref", "space_ref", "scene_ref",
+                  "first_frame", "last_frame", "mid_frame",
+                  "first_frame_raw", "last_frame_raw"),
+    },
     "videoExtend": {"video": ("edit_master",), "image": ("subject_ref",)},
+    "firstLastFrame": {"video": (), "image": ("first_frame", "last_frame")},
 }
 SUPPORTED_MODES = tuple(MODE_ROLES)
 
@@ -36,6 +44,11 @@ ROLE_PROMPT = {
     "space_ref": "空间参考，只提供机位、构图、起点与终点位置；不提供人物动作。",
     "scene_ref": "场景参考，只提供构图、背景与光照。",
     "subject_ref": "主体参考，只定义角色外观。",
+    "first_frame": "首帧定稿图，视频的第一帧，锁定起点构图与人物外观。",
+    "last_frame": "尾帧定稿图，视频的最后一帧，锁定终点位置、大小与朝向。",
+    "mid_frame": "中间过渡帧，仅在首尾间距过大时补充。",
+    "first_frame_raw": "工作台输入底图（原始抽取帧），只提供场景与占位，不是生成素材。",
+    "last_frame_raw": "工作台输入底图（原始抽取帧），只提供场景与占位，不是生成素材。",
 }
 
 _ROLE_RULES = {
@@ -46,7 +59,7 @@ _ROLE_RULES = {
                     "不得插入新的动作事件。",
     },
     "allMediaRef": {
-        "task": "锁定参考视频的空间、镜头与场景，只替换指定主体并按【动作段】重演其动作；"
+        "task": "锁定参考素材的空间、镜头与场景，只替换指定主体并按【动作段】重演其动作；"
                 "不重新设计站位、构图或镜头。",
         "timeline": "用连续的动作顺序描述：起始 → 起身 → 迈步 → 站定；"
                     "不必逐秒拆分。重点写清起步脚、抬脚与落脚、膝盖弯曲、"
@@ -57,6 +70,12 @@ _ROLE_RULES = {
         "task": "从编辑母版 @Video1 的结尾继续生成，保持人物、镜头、场景与光照连续。",
         "timeline": "不重演母版已有的时段；新内容从母版最后一帧之后开始，"
                     "动作与节奏自然接续。",
+    },
+    "firstLastFrame": {
+        "task": "以首帧为起点、尾帧为终点生成中间表演；镜头与两端的构图锁定。",
+        "timeline": "用连续的动作顺序描述首尾之间的过程：起始 → 起身 → 迈步 → 站定；"
+                    "重点写清起步脚、抬脚与落脚、膝盖弯曲、重心转移、"
+                    "身体上下起伏、肩胯转动与摆臂，让人看出是在迈步而不是整体平移。",
     },
 }
 
@@ -135,7 +154,20 @@ def validate_mode(refs: tuple[RefAsset, ...], mode: str) -> None:
             f"模式 {mode!r} 不在本期支持范围（{', '.join(SUPPORTED_MODES)}）")
     allowed = MODE_ROLES[mode]
     videos = [a for a in refs if a.kind == "video"]
-    if not videos:
+    if mode == "firstLastFrame":
+        first = [a for a in refs if a.role == "first_frame"]
+        last = [a for a in refs if a.role == "last_frame"]
+        if videos:
+            raise UsageError("模式 firstLastFrame 不允许视频素材，只接受首帧与尾帧两张图片")
+        if len(refs) != 2 or len(first) != 1 or len(last) != 1:
+            raise UsageError(
+                "模式 firstLastFrame 恰好需要 1 个 first_frame 和 1 个 last_frame，"
+                "且不能出现其他素材或角色")
+        if refs[0].role != "first_frame" or refs[1].role != "last_frame":
+            raise UsageError(
+                "模式 firstLastFrame 的素材顺序必须是 first_frame 在前、last_frame 在后")
+        return
+    if not videos and mode != "allMediaRef":
         raise UsageError(f"模式 {mode} 至少需要 1 个视频素材")
     if mode in ("videoEdit", "videoExtend") and len(videos) != 1:
         raise UsageError(f"模式 {mode} 恰好需要 1 个视频素材，当前 {len(videos)} 个")
@@ -166,17 +198,28 @@ def validate_counts(refs: tuple[RefAsset, ...], mode: str, *,
 
 
 def master(refs: tuple[RefAsset, ...]) -> RefAsset:
-    """几何与上传基准：第一条 edit_master，没有则第一条视频。"""
+    """几何与上传基准：按契约的回退链取第一条可用素材。"""
     videos = [a for a in refs if a.kind == "video"]
-    if not videos:
-        raise UsageError("素材清单里没有视频")
     for asset in videos:
         if asset.role == "edit_master":
             return asset
-    return videos[0]
+    if videos:
+        return videos[0]
+    for asset in refs:
+        if asset.kind == "image" and asset.role in ("space_ref", "scene_ref"):
+            return asset
+    for asset in refs:
+        if asset.kind == "image" and asset.role == "first_frame":
+            return asset
+    images = [a for a in refs if a.kind == "image"]
+    if images:
+        return images[0]
+    raise UsageError("素材清单里没有可用作母版的素材")
 
 
 def duration_source(mode: str) -> str:
+    if mode == "firstLastFrame":
+        return "none"
     return "longest" if mode == "allMediaRef" else "master"
 
 

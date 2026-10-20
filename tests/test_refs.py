@@ -110,7 +110,7 @@ def test_counts_and_prompt_block(tmp_path):
     assert master(refs).id == "v1"
     assert mode_variables("videoEdit")["timeline_rule"].startswith("动作顺序")
     all_media = mode_variables("allMediaRef")
-    assert "锁定参考视频的空间" in all_media["task_rule"]
+    assert "锁定参考素材的空间" in all_media["task_rule"]
     assert "不必逐秒" in all_media["timeline_rule"]
     assert "迈步" in all_media["timeline_rule"]
 
@@ -128,3 +128,70 @@ def test_space_ref_is_allowed_for_all_media_ref(tmp_path):
     assert "@Image1：空间参考" in asset_list(refs)
     with pytest.raises(UsageError, match="不允许 video 使用角色 space_ref"):
         validate_mode(refs, "videoEdit")
+
+
+def test_allmediaref_accepts_image_only(tmp_path):
+    i1 = _file(tmp_path / "i1.png")
+    i2 = _file(tmp_path / "i2.png")
+    path = _write_refs(tmp_path, [
+        {"id": "i1", "kind": "image", "path": str(i1), "role": "subject_ref"},
+        {"id": "i2", "kind": "image", "path": str(i2), "role": "scene_ref"},
+    ])
+    refs = load_refs(path)
+    validate_mode(refs, "allMediaRef")
+    assert master(refs).id == "i2"       # space/scene 图片在第一条图片之前
+
+
+def test_first_last_frame_role_matrix(tmp_path):
+    i1 = _file(tmp_path / "i1.png")
+    i2 = _file(tmp_path / "i2.png")
+    good = _write_refs(tmp_path, [
+        {"id": "i1", "kind": "image", "path": str(i1), "role": "first_frame"},
+        {"id": "i2", "kind": "image", "path": str(i2), "role": "last_frame"},
+    ])
+    refs = load_refs(good)
+    validate_mode(refs, "firstLastFrame")
+    with pytest.raises(UsageError, match="firstLastFrame.*顺序"):
+        validate_mode((refs[1], refs[0]), "firstLastFrame")
+    video = _file(tmp_path / "v.mp4")
+    with pytest.raises(UsageError, match="不允许视频"):
+        validate_mode(refs + (RefAsset("v1", "video", "edit_master", video),),
+                      "firstLastFrame")
+    mid = _file(tmp_path / "i3.png")
+    with pytest.raises(UsageError, match="恰好需要"):
+        validate_mode(refs + (RefAsset("i3", "image", "mid_frame", mid),),
+                      "firstLastFrame")
+
+
+def test_master_fallback_chain(tmp_path):
+    v1 = _file(tmp_path / "v1.mp4")
+    v2 = _file(tmp_path / "v2.mp4")
+    i1 = _file(tmp_path / "i1.png")
+    i2 = _file(tmp_path / "i2.png")
+    i3 = _file(tmp_path / "i3.png")
+    assert master((RefAsset("v1", "video", "motion_ref", v1),)).id == "v1"
+    assert master((RefAsset("v1", "video", "motion_ref", v1),
+                   RefAsset("v2", "video", "edit_master", v2))).id == "v2"
+    assert master((RefAsset("i1", "image", "subject_ref", i1),
+                   RefAsset("i2", "image", "scene_ref", i2))).id == "i2"
+    assert master((RefAsset("i1", "image", "subject_ref", i1),
+                   RefAsset("i2", "image", "first_frame", i2))).id == "i2"
+    assert master((RefAsset("i1", "image", "subject_ref", i1),
+                   RefAsset("i3", "image", "last_frame", i3))).id == "i1"
+
+
+def test_new_role_prompt_wording(tmp_path):
+    i1 = _file(tmp_path / "i1.png")
+    i2 = _file(tmp_path / "i2.png")
+    i3 = _file(tmp_path / "i3.png")
+    text = asset_list((
+        RefAsset("i1", "image", "first_frame", i1),
+        RefAsset("i2", "image", "last_frame", i2),
+        RefAsset("i3", "image", "first_frame_raw", i3),
+    ))
+    assert "@Image1：首帧定稿图" in text
+    assert "@Image2：尾帧定稿图" in text
+    assert "@Image3：工作台输入底图" in text
+    first_last = mode_variables("firstLastFrame")
+    assert "首帧" in first_last["task_rule"]
+    assert "尾帧" in first_last["task_rule"]

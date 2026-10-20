@@ -303,6 +303,28 @@ def test_build_generate_argv_carries_multiple_refs():
     assert argv.index("v1.mp4") < argv.index("11")
 
 
+def test_build_generate_argv_first_last_frame():
+    argv = task_mod.build_generate_argv(
+        prompt="p", model_id=37, mode="firstLastFrame", duration_s=13,
+        resolution="1080p", aspect_ratio="16:9", num=1,
+        first_image=("first.png", None), last_image=("last.png", None))
+    joined = " ".join(argv)
+    assert "--first-image first.png" in joined
+    assert "--last-image last.png" in joined
+    assert argv.index("first.png") < argv.index("last.png")
+    for flag in ("--video", "--image", "--video-asset-id", "--asset-id",
+                 "--aspect-ratio", "--keep-original-sound"):
+        assert flag not in joined
+
+
+def test_build_generate_argv_requires_any_reference():
+    with pytest.raises(AigcError, match="at least one reference"):
+        task_mod.build_generate_argv(
+            prompt="p", model_id=37, mode="allMediaRef", duration_s=8,
+            resolution="1080p", aspect_ratio="16:9", num=1,
+            videos=[], images=[])
+
+
 def test_build_generate_argv_passes_project_session_id():
     argv = task_mod.build_generate_argv(
         prompt="p", model_id=37, mode="videoEdit", duration_s=13,
@@ -330,6 +352,16 @@ def test_result_urls_prefer_the_unwatermarked_render():
                                     "videoUrl": "https://x/a.mp4"}]}}
     urls = task_mod.result_urls(payload)
     assert urls[0] == "https://x/a.mp4"
+
+
+def test_result_urls_accepts_image_suffix():
+    payload = {"data": {"imageUrl": "https://x/a.png",
+                        "wmImageUrl": "https://x/a_wm.png",
+                        "imgUrlList": ["https://x/b.jpg"]}}
+    urls = task_mod.result_urls(payload)
+    assert urls[0] == "https://x/a.png"
+    assert "https://x/b.jpg" in urls
+    assert urls.index("https://x/a_wm.png") > urls.index("https://x/a.png")
 
 
 # ------------------------------------------------------------- round: assets
@@ -528,6 +560,14 @@ def _model_cache_multi(workdir: Path) -> None:
                             "maxCount": 30, "formats": ["png", "jpg", "jpeg", "webp"],
                             "minPixel": 90000, "maxPixel": 36000000,
                             "maxBytes": 31457280,
+                            "minAspectRatio": 0.4, "maxAspectRatio": 2.5}},
+                       {"mode": "firstLastFrame", "supportVirtualIp": True, "maxCount": 2,
+                        "resolutions": ["480p", "720p", "1080p"], "ratios": [],
+                        "duration": {"type": "range", "min": 4, "max": 30},
+                        "refImageValidator": {
+                            "maxCount": 2, "formats": ["png", "jpg", "jpeg", "webp"],
+                            "minPixel": 90000, "maxPixel": 36000000,
+                            "maxBytes": 31457280,
                             "minAspectRatio": 0.4, "maxAspectRatio": 2.5}}]}}],
     }), encoding="utf-8")
 
@@ -584,8 +624,79 @@ def test_prepare_round_gen_multi_assets(tmp_path, monkeypatch):
     assert "@Video1" in prepared.run.prompt
     assert "@Video2" in prepared.run.prompt
     assert "@Image1" in prepared.run.prompt
-    assert "锁定参考视频的空间" in prepared.run.prompt
+    assert "锁定参考素材的空间" in prepared.run.prompt
     assert "1920x1080" in prepared.run.prompt
+
+
+def _firstlast_refs(tmp_path):
+    i1 = tmp_path / "i1.png"
+    i2 = tmp_path / "i2.png"
+    i1.write_bytes(b"i1")
+    i2.write_bytes(b"i2")
+    return (
+        RefAsset("i1", "image", "first_frame", i1),
+        RefAsset("i2", "image", "last_frame", i2),
+    )
+
+
+def _firstlast_pkg(tmp_path, runs, refs):
+    return InputPackage(job="j", input=None, mask=None, canvas_size=None,
+                        source_size=None, workdir=runs / "j", template="t",
+                        variables={}, refs=refs)
+
+
+def _firstlast_offline(tmp_path, monkeypatch, *, duration: int | None = None):
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    (templates / "t.md").write_text(
+        "{asset_list}\n{task_rule}\n{timeline_rule}\ncanvas {canvas_w}x{canvas_h}",
+        encoding="utf-8")
+    monkeypatch.setattr(pipe, "templates_dir", lambda: templates)
+    runs = tmp_path / "runs"
+    _model_cache_multi(runs / "j")
+    monkeypatch.setattr(pipe, "probe_image", lambda path, conf: InputSpec(
+        width=1920, height=1080, fps=0.0, duration_s=0.0,
+        size_bytes=500_000, container=("png",)))
+
+    def no_scale(*args, **kwargs):
+        raise AssertionError("首尾帧已合格，不该缩放")
+
+    monkeypatch.setattr(pipe, "scale_reference_image", no_scale)
+    overrides = ["mglc.mode=firstLastFrame"]
+    if duration is not None:
+        overrides.append(f"mglc.duration_s={duration}")
+    conf = config_mod.load(overrides=overrides)
+    return conf, runs, _firstlast_refs(tmp_path)
+
+
+def test_prepare_round_gen_image_only(tmp_path, monkeypatch):
+    conf, runs, refs = _firstlast_offline(tmp_path, monkeypatch, duration=13)
+    prepared = pipe.prepare_round(
+        conf, _firstlast_pkg(tmp_path, runs, refs), log=Log(quiet=True))
+
+    assert prepared.run.params["duration_s"] == 13
+    assert prepared.run.params["duration_source"] == "none"
+    assert prepared.run.params["keep_sound"] is False
+    assert prepared.run.params["master"] == "i1"
+    assert prepared.run.params["input"] is None
+    assert prepared.run.upload["path"] == str(refs[0].path)
+    assert prepared.geometry.canvas_size == (1920, 1080)
+    assert "首帧定稿图" in prepared.run.prompt
+    assert "尾帧定稿图" in prepared.run.prompt
+
+
+def test_prepare_round_first_last_defaults_to_four_seconds(tmp_path, monkeypatch):
+    conf, runs, refs = _firstlast_offline(tmp_path, monkeypatch)
+    prepared = pipe.prepare_round(
+        conf, _firstlast_pkg(tmp_path, runs, refs), log=Log(quiet=True))
+    assert prepared.run.params["duration_s"] == 4
+
+
+def test_duration_explicit_out_of_range(tmp_path, monkeypatch):
+    conf, runs, refs = _firstlast_offline(tmp_path, monkeypatch, duration=31)
+    with pytest.raises(UsageError, match="4-30"):
+        pipe.prepare_round(conf, _firstlast_pkg(tmp_path, runs, refs),
+                           log=Log(quiet=True))
 
 
 def test_prepare_round_gen_rejects_bad_role_matrix(tmp_path, monkeypatch):
