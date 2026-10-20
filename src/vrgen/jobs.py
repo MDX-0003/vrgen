@@ -270,13 +270,19 @@ def list_rounds(workdir: str | Path | None, job: str) -> list[Run]:
 def latest_usable_round(workdir: str | Path | None, job: str) -> Run:
     """有结果文件且 gate != error 的最新一轮。"""
     usable = [r for r in list_rounds(workdir, job)
-              if r.result and Path(r.result).is_file()
+              if _has_result(r)
               and (r.gate or {}).get("verdict") != "error"]
     if not usable:
         raise VrgenError(
             f"job {job} 没有可用的轮次（台账根 {job_dir(workdir, job)}）"
         )
     return usable[-1]
+
+
+def _has_result(run: Run) -> bool:
+    if run.results:
+        return any(Path(p).is_file() for p in run.results)
+    return bool(run.result and Path(run.result).is_file())
 
 
 def find_round(workdir: str | Path | None, job: str, round_key: str) -> Run:
@@ -286,16 +292,27 @@ def find_round(workdir: str | Path | None, job: str, round_key: str) -> Run:
         raise UsageError(f"job {job}：{exc}") from exc
 
 
-def result_path(run: Run) -> Path:
-    p = run.result_path
+def result_path(run: Run, index: int | None = None) -> Path:
+    """The result file for one round; image rounds may have several candidates."""
+    if run.results:
+        pick = 1 if index is None else int(index)
+        if not 1 <= pick <= len(run.results):
+            raise VrgenError(
+                f"Session {run.dir.name} 只有 {len(run.results)} 个候选，"
+                f"没有第 {pick} 个；用 --index 1..{len(run.results)}")
+        p = Path(run.results[pick - 1])
+    else:
+        if index not in (None, 1):
+            raise VrgenError(f"Session {run.dir.name} 只有一个结果，没有第 {index} 个")
+        p = run.result_path
     if p is None:
         # 从未生成过结果（提交失败/中断，只留下了过程记录）。
         # 字段名（run.result）级别的细节降级到这行注释，终端只留人话与下一步。
         raise VrgenError(
-            f"Session {run.dir.name} 没有生成过结果视频（当时提交失败或中断，"
+            f"Session {run.dir.name} 没有生成过结果（当时提交失败或中断，"
             f"只留下了过程记录），无法被后续流程使用；请换一个 Session，或重新提交生成")
     if not p.is_file():
         raise VrgenError(
-            f"Session {run.dir.name} 记录的结果视频不在了：{p}"
+            f"Session {run.dir.name} 记录的结果不在了：{p}"
             f"（可能被手动移动或删除）；请换一个 Session，或重新提交生成")
     return p

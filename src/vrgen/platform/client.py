@@ -158,17 +158,31 @@ class Mglc:
     def task_status(self, task_id: int) -> Envelope:
         return self.call("task", "status", "--task-id", str(int(task_id)))
 
+    def _spending(self, command: Sequence[str], args: Sequence[str], *,
+                  confirm: bool, timeout: float) -> Envelope:
+        """The one guard around every quota-spending subcommand."""
+        if not confirm:
+            raise MglcError(
+                -1,
+                f"{' '.join(command)} needs confirm=True; use `vrgen ... --yes`",
+                [*command, *args])
+        return self.call(*command, *args, timeout=timeout)
+
     def generate(self, args: Sequence[str], confirm: bool = False,
                  timeout: float = 300.0) -> Envelope:
-        """THE quota-spending call. Refuses unless ``confirm`` is true.
+        """THE video quota-spending call. Refuses unless ``confirm`` is true.
 
         ``args`` is built by ``round.task.build_generate_argv`` -- one place decides
         what a request looks like, so there is one place to audit.
         """
-        if not confirm:
-            raise MglcError(-1, "generate() needs confirm=True; use `vrpad aigc submit --yes`",
-                            ["generate", *args])
-        return self.call("video", "generate", *args, timeout=timeout)
+        return self._spending(("video", "generate"), args,
+                              confirm=confirm, timeout=timeout)
+
+    def image_generate(self, args: Sequence[str], confirm: bool = False,
+                       timeout: float = 300.0) -> Envelope:
+        """THE image quota-spending call; same confirmation rule as video."""
+        return self._spending(("image", "generate"), args,
+                              confirm=confirm, timeout=timeout)
 
 
 def walk_scalars(node: Any):

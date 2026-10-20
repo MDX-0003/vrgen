@@ -17,7 +17,7 @@ from vrgen.prep.budget import InputSpec
 runner = CliRunner()
 
 REAL_COMMANDS = {"register", "status", "result", "submit", "login", "models",
-                 "peek", "prompt", "params", "sessions"}
+                 "peek", "prompt", "params", "sessions", "image"}
 
 
 def test_help_lists_the_contract_surface():

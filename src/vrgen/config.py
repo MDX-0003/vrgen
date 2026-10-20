@@ -37,6 +37,10 @@ _FALLBACK: dict = {
         "poll_interval_s": 20.0,
         "poll_timeout_s": 3600.0,
         "review_timeout_s": 1800.0,
+        "image_model_id": 44,
+        "image_ratio": "16:9",
+        "image_resolution": "4K",
+        "image_num": 4,
     },
 }
 
@@ -179,3 +183,11 @@ def _validate(data: dict) -> None:
             raise ConfigError(f"mglc.{key} must be > 0")
     if not 0 <= float(mglc["upload_crf"]) <= 51:
         raise ConfigError("mglc.upload_crf must be in 0..51")
+    if int(mglc.get("image_model_id", 44)) < 1:
+        raise ConfigError("mglc.image_model_id must be >= 1")
+    if ":" not in str(mglc.get("image_ratio", "16:9")):
+        raise ConfigError("mglc.image_ratio must be W:H (e.g. 16:9)")
+    if str(mglc.get("image_resolution", "4K")) not in ("1K", "2K", "4K"):
+        raise ConfigError("mglc.image_resolution must be 1K | 2K | 4K")
+    if not 1 <= int(mglc.get("image_num", 4)) <= 4:
+        raise ConfigError("mglc.image_num must be in 1..4")

@@ -50,6 +50,7 @@ class Run:
     assets: dict[str, int] = field(default_factory=dict)        # kind -> asset id
     task_id: int | None = None
     result: str | None = None
+    results: list[str] | None = None       # image rounds: every candidate
     gate: dict[str, Any] | None = None
     created_utc: str = ""
     updated_utc: str = ""
@@ -87,6 +88,11 @@ class Run:
     @property
     def result_path(self) -> Path | None:
         return Path(self.result) if self.result else None
+
+    @property
+    def kind(self) -> str:
+        """``video`` unless the round explicitly says otherwise."""
+        return str(self.params.get("kind") or "video")
 
     def note(self, text: str) -> None:
         self.notes.append(text)

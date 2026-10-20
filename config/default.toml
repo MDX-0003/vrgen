@@ -28,3 +28,9 @@ models_max_age_h = 24.0
 poll_interval_s  = 20.0
 poll_timeout_s   = 3600.0   # 平台自报 2.5 约 8 分钟，留足余量
 review_timeout_s = 1800.0   # SD 合规素材审核是异步的
+
+# --- 图片生成（关键帧工作台；契约 case-model.md §4 的 image submit）---
+image_model_id   = 44        # 专业图片-2.5；备选 Seedream 4.5 = 25
+image_ratio      = "16:9"    # 首期工作台固定 16:9
+image_resolution = "4K"      # 1K | 2K | 4K；默认取模型最高档
+image_num        = 4         # 每步候选数，人工挑 1 张

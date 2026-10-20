@@ -26,6 +26,8 @@ from .platform.models import find_model, load_models
 from .prep import params as params_mod
 from .prep import prompt as prompt_mod
 from .progress import Log
+from .round import image as image_mod
+from .round import kinds as kinds_mod
 from .round.ledger import PROGRESS_LOG, RunStore, append_call_log, shell_line
 from .round.pipeline import InputPackage, execute_round, prepare_round
 from .round.task import build_generate_argv
@@ -334,6 +336,103 @@ def _rounds_line(job: str, workdir) -> None:
     rows = RunStore(jobs.job_dir(workdir, job)).summary()
     if rows:
         print(f"rounds      {len(rows)} recorded ({', '.join(rows)})")
+
+
+# ── 图片生成：关键帧工作台（契约 case-model.md §4）──────────────────────
+
+image_app = typer.Typer(
+    help="图片生成任务：提交、轮询、下载全部候选；台账记为 img- 轮次。",
+    no_args_is_help=True,
+)
+app.add_typer(image_app, name="image")
+
+
+@image_app.command("submit")
+def image_submit(
+    job: str = typer.Option(..., "--job", help="job 名（调用方通常传 case 名）。"),
+    prompt: str = typer.Option(..., "--prompt", help="图片提示词正文。"),
+    images: list[Path] = typer.Option(None, "--image", exists=True, dir_okay=False,
+                                      help="参考图，可重复；按顺序传给 mglc。"),
+    model_id: int = typer.Option(None, "--model-id",
+                                 help="图片模型 ID；缺省取 config 的 image_model_id。"),
+    ratio: str = typer.Option(None, "--ratio", help="输出比例；缺省取 config 的 image_ratio。"),
+    resolution: str = typer.Option(
+        None, "--resolution", help="1K | 2K | 4K；缺省取 config 的最高档。"),
+    num: int = typer.Option(None, "--num", help="候选数量 1..4；缺省取 config。"),
+    session_id: int = typer.Option(
+        None, "--session-id", help="项目生成会话 ID；0 = 个人额度。"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只建台账并打印 argv，不发请求。"),
+    workdir: Path = typer.Option(None, "--workdir", help="台账根（默认 $VRGEN_RUNS_DIR）。"),
+    config: Path = typer.Option(None, "--config", help="TOML 配置文件。"),
+) -> None:
+    """提交一轮图片生成：提交 → 轮询 → 下载全部候选 → 逐张闸门。"""
+    log = Log()
+    try:
+        conf = config_mod.load(config)
+        resolved_model = int(model_id if model_id is not None
+                             else conf.get("mglc.image_model_id", 44))
+        resolved_ratio = str(ratio or conf.get("mglc.image_ratio", "16:9"))
+        resolved_resolution = str(resolution or conf.get("mglc.image_resolution", "4K"))
+        resolved_num = int(num if num is not None else conf.get("mglc.image_num", 4))
+        resolved_session = int(session_id if session_id is not None
+                               else conf.get("mglc.session_id", 0) or 0)
+        pkg = image_mod.ImagePackage(
+            job=job, prompt=prompt, model_id=resolved_model,
+            images=tuple(images or ()), ratio=resolved_ratio,
+            resolution=resolved_resolution, num=resolved_num,
+            workdir=jobs.job_dir(workdir, job), session_id=resolved_session)
+        prepared = kinds_mod.KINDS["image"].prepare_round(conf, pkg, log=log)
+    except VrgenError as exc:
+        _fail(exc)
+
+    log.attach(prepared.run.dir / PROGRESS_LOG)
+    print(f"job         {job}")
+    print(f"round       {prepared.run.dir}")
+    print(f"model       {resolved_model}  {resolved_ratio}  {resolved_resolution}  "
+          f"x{resolved_num}")
+    print(f"images      {', '.join(str(p) for p in pkg.images)}")
+    print(f"prompt      {prepared.run.prompt_path}\n")
+    print(prepared.run.prompt)
+
+    argv = kinds_mod.KINDS["image"].build_argv(
+        prompt=pkg.prompt, model_id=pkg.model_id, images=list(pkg.images),
+        ratio=pkg.ratio, resolution=pkg.resolution, num=pkg.num,
+        session_id=pkg.session_id)
+    from .platform.binpath import find_mglc
+    command = shell_line([find_mglc(conf) or "mglc",
+                          *kinds_mod.KINDS["image"].quota_command, *argv])
+    print(f"\ncommand     {command}")
+
+    if dry_run:
+        print("\n--dry-run：什么都没发，没花额度。")
+        print(f"calls       "
+              f"{append_call_log(prepared.run, [], mode='vrgen image submit --dry-run')}")
+        return
+
+    client = Mglc(config=conf, binary=find_mglc(conf))
+    try:
+        outcome = kinds_mod.KINDS["image"].execute_round(
+            conf, pkg, prepared, client=client, log=log)
+    except UsageError as exc:
+        _fail(exc)
+    except TaskFailed as exc:
+        log.error(str(exc))
+        raise typer.Exit(1) from exc
+    except VrgenError as exc:
+        log.error(str(exc))
+        raise typer.Exit(1) from exc
+    finally:
+        print(f"calls       "
+              f"{append_call_log(prepared.run, client.transcript, mode='vrgen image submit')}")
+        log.close()
+
+    for index, path in enumerate(outcome.results, start=1):
+        print(f"result[{index}]   {path}  "
+              f"({Path(path).stat().st_size / 1e6:.1f} MB)")
+    gate = outcome.gate or {}
+    print(f"gate        {gate.get('verdict')}  {len(outcome.results)} candidate(s)")
+    if gate.get("verdict") == "error":
+        raise typer.Exit(1)
 
 
 # ── 平台辅助：login / models / peek ─────────────────────────────────────
@@ -750,11 +849,17 @@ def status(
         gate = (r.gate or {}).get("verdict", "?")
         backend = str(r.params.get("backend", "?"))
         mark = "*" if gate != "error" else "x"
-        # result=yes/no：这个 Session 有没有生成好的结果视频——调用方（web）
+        info = kinds_mod.KINDS.get(r.kind)
+        label = f"{r.dir.name} [img]" if info is not None and info.kind == "image" else r.dir.name
+        # result=yes/no：这个 Session 有没有生成好的结果——调用方（web）
         # 靠它预先判断"能不能选用"，而不是等 result 命令失败才知道
-        has_result = r.result_path is not None and r.result_path.is_file()
-        typer.echo(f"  {mark} {r.dir.name:<22} {backend:<7} {r.stage:<10} "
-                   f"gate={gate:<8} result={'yes' if has_result else 'no':<3} {r.updated_utc}")
+        has_result = jobs._has_result(r)
+        if info is not None and info.multi_result and r.results:
+            result_text = f"x{len(r.results)}"
+        else:
+            result_text = "yes" if has_result else "no"
+        typer.echo(f"  {mark} {label:<22} {backend:<7} {r.stage:<10} "
+                   f"gate={gate:<8} result={result_text:<3} {r.updated_utc}")
 
 
 @app.command()
@@ -763,15 +868,19 @@ def result(
     out: Path = typer.Option(..., "--out", help="结果拷贝到这里。"),
     round_key: str = typer.Option("latest", "--round",
                                   help="轮次 key 或前缀；缺省取最新可用轮（gate != error）。"),
+    index: int = typer.Option(None, "--index",
+                              help="图片轮次取第 N 张候选（1 起）；缺省第一张。"),
     workdir: Path = typer.Option(None, "--workdir", help="台账根。"),
 ) -> None:
-    """导出一轮结果（vrstudio adopt 时调用）。"""
+    """导出一轮结果（vrstudio adopt / 关键帧挑选时调用）。"""
     try:
         run = (jobs.latest_usable_round(workdir, job) if round_key == "latest"
                else jobs.find_round(workdir, job, round_key))
-        src = jobs.result_path(run)
+        src = jobs.result_path(run, index)
         out.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, out)
     except VrgenError as exc:
         _fail(exc)
-    typer.echo(f"{out}   round={run.dir.name}   gate={(run.gate or {}).get('verdict')}")
+    picked = f"  index={index}" if index is not None else ""
+    typer.echo(f"{out}   round={run.dir.name}{picked}   "
+               f"gate={(run.gate or {}).get('verdict')}")
