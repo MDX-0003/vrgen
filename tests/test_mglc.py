@@ -584,7 +584,7 @@ def test_prepare_round_gen_multi_assets(tmp_path, monkeypatch):
     assert "@Video1" in prepared.run.prompt
     assert "@Video2" in prepared.run.prompt
     assert "@Image1" in prepared.run.prompt
-    assert "重新生成完整表演" in prepared.run.prompt
+    assert "锁定参考视频的空间" in prepared.run.prompt
     assert "1920x1080" in prepared.run.prompt
 
 

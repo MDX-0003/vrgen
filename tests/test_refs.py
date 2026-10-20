@@ -110,6 +110,21 @@ def test_counts_and_prompt_block(tmp_path):
     assert master(refs).id == "v1"
     assert mode_variables("videoEdit")["timeline_rule"].startswith("动作顺序")
     all_media = mode_variables("allMediaRef")
-    assert "重新生成完整表演" in all_media["task_rule"]
+    assert "锁定参考视频的空间" in all_media["task_rule"]
     assert "不必逐秒" in all_media["timeline_rule"]
     assert "迈步" in all_media["timeline_rule"]
+
+
+def test_space_ref_is_allowed_for_all_media_ref(tmp_path):
+    v = _file(tmp_path / "v.mp4")
+    i = _file(tmp_path / "i.png")
+    path = _write_refs(tmp_path, [
+        {"id": "v1", "kind": "video", "path": str(v), "role": "space_ref"},
+        {"id": "i1", "kind": "image", "path": str(i), "role": "space_ref"},
+    ])
+    refs = load_refs(path)
+    validate_mode(refs, "allMediaRef")
+    assert "@Video1：空间参考" in asset_list(refs)
+    assert "@Image1：空间参考" in asset_list(refs)
+    with pytest.raises(UsageError, match="不允许 video 使用角色 space_ref"):
+        validate_mode(refs, "videoEdit")

@@ -71,6 +71,28 @@ def geometry_variables(geom: UploadGeometry) -> dict[str, object]:
     }
 
 
+def geometry_from_sizes(canvas_size: tuple[int, int],
+                        source_size: tuple[int, int]) -> dict[str, object]:
+    """按本地 canvas/source 构造预览用几何变量（上传缩放按 100% 处理）。
+
+    生成（gen）的 canvas 与 source 相同，带宽为 0；补丁（patch/fullredraw）
+    的带宽取画布与源宽差的一半。实际上传被缩放时，真实像素值以台账为准。
+    """
+    w, h = canvas_size
+    sw, sh = source_size
+    band = max(0, (w - sw) // 2)
+    geom = UploadGeometry(
+        canvas_size=(w, h),
+        source_size=(sw, sh),
+        band_w=band,
+        region_left=(0, band),
+        region_main=(band, w - band),
+        region_right=(w - band, w),
+        scale=1.0,
+    )
+    return geometry_variables(geom)
+
+
 class _Variables(dict):
     """A dict that names the offender when a template asks for an unknown key."""
 

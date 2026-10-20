@@ -101,6 +101,52 @@ def test_prompt_show_defaults_and_placeholders(tmp_path):
     assert "360-closure" in data["available"]
 
 
+def test_prompt_show_renders_with_refs_and_geometry(tmp_path):
+    jobs.save_prompt_vars(tmp_path, "j1", jobs.PromptVars(template="gen-multi", vars={
+        "subject": "高官从起点走到终点。",
+        "target": "老年高官。",
+        "plot": "镜头1：坐。镜头2：起身。",
+        "preserve": "镜头固定。",
+        "allowed_changes": "只换人。",
+    }))
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"v")
+    image = tmp_path / "i.png"
+    image.write_bytes(b"i")
+    refs = tmp_path / "refs.json"
+    refs.write_text(json.dumps({"assets": [
+        {"id": "v1", "kind": "video", "role": "space_ref", "path": str(video)},
+        {"id": "i1", "kind": "image", "role": "subject_ref", "path": str(image)},
+    ]}, ensure_ascii=False), encoding="utf-8")
+
+    r = runner.invoke(app, ["prompt", "show", "--job", "j1", "--template", "gen-multi",
+                            "--workdir", str(tmp_path), "--refs", str(refs),
+                            "--mode", "allMediaRef",
+                            "--canvas", "1920x1052", "--source", "1920x1052"])
+    assert r.exit_code == 0, r.output
+    data = json.loads(r.output)
+    assert data["render_error"] is None
+    rendered = data["rendered"]
+    assert "@Video1：空间参考" in rendered
+    assert "锁定参考视频的空间" in rendered
+    assert "1920×1052" in rendered
+    assert "高官从起点走到终点" in rendered
+    assert "{" not in rendered
+
+
+def test_prompt_show_reports_missing_variable(tmp_path):
+    jobs.save_prompt_vars(tmp_path, "j1", jobs.PromptVars(template="gen-multi", vars={
+        "subject": "主体",
+    }))
+    r = runner.invoke(app, ["prompt", "show", "--job", "j1", "--template", "gen-multi",
+                            "--workdir", str(tmp_path),
+                            "--canvas", "1920x1052", "--source", "1920x1052"])
+    assert r.exit_code == 0, r.output
+    data = json.loads(r.output)
+    assert data["rendered"] is None
+    assert "asset_list" in data["render_error"]
+
+
 def test_prompt_save_roundtrip_with_new_keys(tmp_path):
     wd = str(tmp_path)
     r = runner.invoke(app, ["prompt", "save", "--job", "j1", "--set", "theme=黄昏",
@@ -202,7 +248,7 @@ def test_params_save_accepts_mode_only(tmp_path):
 def test_prompt_show_marks_gen_multi_computed_keys(tmp_path):
     from vrgen import jobs as jobs_mod
     payload = jobs_mod.prompt_overview(tmp_path, "j1", template="gen-multi")
-    assert set(payload["computed_keys"]) == {"asset_list", "task_rule", "timeline_rule"}
+    assert set(payload["computed_keys"]) == {"asset_list", "task_rule"}
     with pytest.raises(UsageError, match="自动生成"):
         jobs_mod.edit_prompt_vars(tmp_path, "j1", sets={"asset_list": "x"},
                                   template="gen-multi")

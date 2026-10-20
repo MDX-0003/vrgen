@@ -24,6 +24,7 @@ from .platform.client import Mglc
 from .platform.media import probe_input
 from .platform.models import find_model, load_models
 from .prep import params as params_mod
+from .prep import prompt as prompt_mod
 from .progress import Log
 from .round.ledger import PROGRESS_LOG, RunStore, append_call_log, shell_line
 from .round.pipeline import InputPackage, execute_round, prepare_round
@@ -421,11 +422,48 @@ def _echo_payload(payload: dict) -> None:
     typer.echo(json.dumps(payload, ensure_ascii=True, indent=1))
 
 
+def _prompt_preview(payload: dict, *, workdir, job: str,
+                    refs: Path | None, mode: str | None,
+                    canvas: str | None, source: str | None) -> dict:
+    """给 prompt show/save 的返回补上展开后的正文（rendered / render_error）。
+
+    预览只读：不建轮次、不碰平台。素材清单需要 ``--refs``；模式省略时读
+    generation.toml；画布与源尺寸需要成对给出。
+    """
+    text = payload.get("template_text")
+    if not text:
+        return payload
+    variables: dict[str, object] = dict(payload.get("vars") or {})
+    try:
+        if refs is not None:
+            variables["asset_list"] = refs_mod.asset_list(refs_mod.load_refs(refs))
+        resolved_mode = mode
+        if resolved_mode is None:
+            resolved_mode = jobs.load_generation_params(workdir, job).mode
+        if resolved_mode:
+            variables.update(refs_mod.mode_variables(resolved_mode))
+        if canvas is not None and source is not None:
+            variables.update(prompt_mod.geometry_from_sizes(
+                _parse_wh(canvas, "--canvas"), _parse_wh(source, "--source")))
+        payload["rendered"] = prompt_mod.render(text, variables)
+        payload["render_error"] = None
+    except (VrgenError, OSError, ValueError) as exc:
+        payload["rendered"] = None
+        payload["render_error"] = str(exc)
+    return payload
+
+
 @prompt_app.command("show")
 def prompt_show(
     job: str = typer.Option(..., "--job", help="job 名（调用方通常传 case 名）。"),
     template: str = typer.Option(None, "--template", help="覆盖草稿/配置的模板选择。"),
     workdir: Path = typer.Option(None, "--workdir", help="台账根（默认 $VRGEN_RUNS_DIR）。"),
+    refs: Path = typer.Option(None, "--refs", exists=True, dir_okay=False,
+                              help="gen 素材清单 JSON；提供后展开素材清单。"),
+    mode: str = typer.Option(None, "--mode",
+                             help="生成模式；省略时读 generation.toml。"),
+    canvas: str = typer.Option(None, "--canvas", help="画布尺寸 WxH；展开几何占位用。"),
+    source: str = typer.Option(None, "--source", help="源尺寸 WxH；展开几何占位用。"),
 ) -> None:
     """读模板与变量草稿：正文、占位符、几何键、[vars] 当前值。"""
     try:
@@ -433,6 +471,8 @@ def prompt_show(
                                        config_default=_prompt_default())
     except VrgenError as exc:
         _fail(exc)
+    payload = _prompt_preview(payload, workdir=workdir, job=job, refs=refs,
+                              mode=mode, canvas=canvas, source=source)
     _echo_payload(payload)
 
 
@@ -445,6 +485,12 @@ def prompt_save(
                                      help="删除变量；模板正文引用的键拒绝删除。"),
     template: str = typer.Option(None, "--template", help="切换模板 id（必须存在）。"),
     workdir: Path = typer.Option(None, "--workdir", help="台账根（默认 $VRGEN_RUNS_DIR）。"),
+    refs: Path = typer.Option(None, "--refs", exists=True, dir_okay=False,
+                              help="gen 素材清单 JSON；提供后展开素材清单。"),
+    mode: str = typer.Option(None, "--mode",
+                             help="生成模式；省略时读 generation.toml。"),
+    canvas: str = typer.Option(None, "--canvas", help="画布尺寸 WxH；展开几何占位用。"),
+    source: str = typer.Option(None, "--source", help="源尺寸 WxH；展开几何占位用。"),
 ) -> None:
     """编辑变量草稿并写回 prompt-vars.toml（JSON 回显保存后的状态）。"""
     try:
@@ -453,6 +499,8 @@ def prompt_save(
                                         config_default=_prompt_default())
     except VrgenError as exc:
         _fail(exc)
+    payload = _prompt_preview(payload, workdir=workdir, job=job, refs=refs,
+                              mode=mode, canvas=canvas, source=source)
     _echo_payload(payload)
 
 

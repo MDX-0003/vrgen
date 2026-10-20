@@ -18,13 +18,13 @@ from pathlib import Path
 from .errors import UsageError
 
 KINDS = ("video", "image")
-ROLES = ("edit_master", "motion_ref", "scene_ref", "subject_ref")
+ROLES = ("edit_master", "motion_ref", "space_ref", "scene_ref", "subject_ref")
 
 #: 本期支持的模式与允许的角色；与 vrstudio.case.MODE_ROLES 保持一致。
 MODE_ROLES: dict[str, dict[str, tuple[str, ...]]] = {
     "videoEdit": {"video": ("edit_master",), "image": ("subject_ref",)},
-    "allMediaRef": {"video": ("edit_master", "motion_ref", "scene_ref"),
-                    "image": ("subject_ref", "scene_ref")},
+    "allMediaRef": {"video": ("edit_master", "motion_ref", "space_ref", "scene_ref"),
+                    "image": ("subject_ref", "space_ref", "scene_ref")},
     "videoExtend": {"video": ("edit_master",), "image": ("subject_ref",)},
 }
 SUPPORTED_MODES = tuple(MODE_ROLES)
@@ -33,6 +33,7 @@ SUPPORTED_MODES = tuple(MODE_ROLES)
 ROLE_PROMPT = {
     "edit_master": "编辑母版，负责时间轴、构图与动作基准。",
     "motion_ref": "动作参考，只提供动作节奏与路径。",
+    "space_ref": "空间参考，只提供机位、构图、起点与终点位置；不提供人物动作。",
     "scene_ref": "场景参考，只提供构图、背景与光照。",
     "subject_ref": "主体参考，只定义角色外观。",
 }
@@ -45,8 +46,8 @@ _ROLE_RULES = {
                     "不得插入新的动作事件。",
     },
     "allMediaRef": {
-        "task": "按下面的情节与动作顺序重新生成完整表演；"
-                "素材只提供身份、动作或场景参考，不要求逐帧复刻任何一条视频。",
+        "task": "锁定参考视频的空间、镜头与场景，只替换指定主体并按【动作段】重演其动作；"
+                "不重新设计站位、构图或镜头。",
         "timeline": "用连续的动作顺序描述：起始 → 起身 → 迈步 → 站定；"
                     "不必逐秒拆分。重点写清起步脚、抬脚与落脚、膝盖弯曲、"
                     "重心转移、身体上下起伏、肩胯转动与摆臂，"
