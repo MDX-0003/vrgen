@@ -426,6 +426,14 @@ def test_gen_edit_template_is_available_and_needs_its_variables():
     assert "{theme}" not in text
 
 
+def test_character_repaint_template_is_available():
+    from vrgen.paths import templates_dir
+    text = (templates_dir() / "character-repaint.md").read_text(encoding="utf-8")
+    for key in ("subject", "target", "plot", "motion_rule", "preserve",
+                "allowed_changes", "canvas_w", "canvas_h"):
+        assert "{" + key + "}" in text
+
+
 def test_effective_aspect_maps_modes_with_a_ratio_list():
     from vrgen.prep.params import effective_aspect
     assert effective_aspect("auto", ()) == "auto"
