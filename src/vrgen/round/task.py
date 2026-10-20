@@ -286,13 +286,15 @@ def _walk_url_values(node: Any, key: str = ""):
         yield key, node
 
 
-def result_urls(data: Any) -> list[str]:
+def result_urls(data: Any, *, include_marked: bool = True) -> list[str]:
     """Result media URLs, watermarked variants last.
 
     The platform returns both ``videoUrl`` and ``wmVideoUrl`` for the same render.
     The watermarked one must not be picked: the endpoint lock at the start and end
     of the recomposed panorama adopts raw pixels, so a watermark would land in the
-    deliverable.
+    deliverable. ``include_marked=False`` is for multi-candidate image rounds,
+    where every unwatermarked URL is a separate candidate and the watermarked
+    duplicates are not candidates at all.
     """
     plain: list[str] = []
     marked: list[str] = []
@@ -311,7 +313,10 @@ def result_urls(data: Any) -> list[str]:
         if url not in seen:
             seen.add(url)
             ordered.append(url)
-    return ordered
+    if include_marked:
+        return ordered
+    marked_set = set(marked)
+    return [url for url in ordered if url not in marked_set]
 
 
 def fetch(client: Mglc, run: Run, *, timeout: float = 600.0, opener=None,

@@ -217,7 +217,7 @@ def _fetch_all(client: Mglc, run: Run, *, opener=None, log=None) -> tuple[Path, 
     if run.task_id is None:
         raise AigcError(f"run {run.key} was never submitted")
     data = client.task_status(int(run.task_id)).data
-    urls = result_urls(data)
+    urls = result_urls(data, include_marked=False) or result_urls(data)
     if not urls:
         raise AigcError(
             "the image task reports success but carries no result URL; raw payload:\n"

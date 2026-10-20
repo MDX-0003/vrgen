@@ -362,6 +362,9 @@ def test_result_urls_accepts_image_suffix():
     assert urls[0] == "https://x/a.png"
     assert "https://x/b.jpg" in urls
     assert urls.index("https://x/a_wm.png") > urls.index("https://x/a.png")
+    only_plain = task_mod.result_urls(payload, include_marked=False)
+    assert "https://x/a_wm.png" not in only_plain
+    assert "https://x/b.jpg" in only_plain
 
 
 # ------------------------------------------------------------- round: assets
