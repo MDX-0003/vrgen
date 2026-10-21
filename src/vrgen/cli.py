@@ -21,7 +21,7 @@ from . import sessions as sessions_mod
 from .errors import TaskFailed, UsageError, VrgenError
 from .paths import templates_dir
 from .platform.client import Mglc
-from .platform.media import probe_input
+from .platform.media import probe_image, probe_input
 from .platform.models import find_model, load_models
 from .prep import params as params_mod
 from .prep import prompt as prompt_mod
@@ -137,16 +137,12 @@ def _parse_wh(text: str, what: str) -> tuple[int, int]:
 @app.command()
 def submit(
     job: str = typer.Option(..., "--job", help="job 名（调用方通常传 case 名）。"),
-    input: Path = typer.Option(None, "--input", exists=True, dir_okay=False,
-                               help="送生成的视频（patch/fullredraw；与 --refs 互斥）。"),
-    refs: Path = typer.Option(None, "--refs", exists=True, dir_okay=False,
-                              help="gen 多素材清单 JSON（与 --input 互斥）。"),
+    refs: Path = typer.Option(..., "--refs", exists=True, dir_okay=False,
+                              help="提交资产清单 JSON（三流程唯一的提交入口）。"),
     canvas: str = typer.Option(None, "--canvas",
-                               help="画布尺寸 WxH；gen 可省略，由母版推导。"),
+                               help="画布尺寸 WxH；省略时由母版推导。"),
     source: str = typer.Option(None, "--source",
-                               help="源尺寸 WxH；gen 可省略，由母版推导。"),
-    mask: Path = typer.Option(None, "--mask", exists=True, dir_okay=False,
-                              help="区域标注图（仅 patch/fullredraw）。"),
+                               help="源尺寸 WxH；省略时等于画布。"),
     template: str = typer.Option(
         None, "--template", help="模板 id；首次指定后记入 prompt-vars 草稿。"),
     sets: list[str] = typer.Option(None, "--set",
@@ -183,26 +179,18 @@ def submit(
             resolution=resolution, duration=duration, num=num,
             aspect_ratio=aspect_ratio, scale=scale, session_id=session_id,
         )
-        if refs is not None and input is not None:
-            raise UsageError("--refs 与 --input 互斥：gen 多素材只走 --refs")
-        if refs is None and input is None:
-            raise UsageError("需要 --input（patch/fullredraw）或 --refs（gen 多素材）")
-        if refs is not None and mask is not None:
-            raise UsageError("--mask 只用于 patch/fullredraw；gen 的图片请放进 --refs 清单")
         if (canvas is None) != (source is None):
             raise UsageError("--canvas 与 --source 要么都给，要么都不给")
         canvas_size = _parse_wh(canvas, "--canvas") if canvas else None
         source_size = _parse_wh(source, "--source") if source else None
-        if refs is None and (canvas_size is None or source_size is None):
-            raise UsageError("--input 路径必须同时给 --canvas 与 --source")
-        ref_assets = refs_mod.load_refs(refs) if refs is not None else ()
+        ref_assets = refs_mod.load_refs(refs)
+        refs_mod.validate_mode(ref_assets, str(conf.get("mglc.mode")))
 
         # prompt-vars 草稿 + --set（自适应校验）+ 模板解析（首次指定记入草稿）
         pv = jobs.load_prompt_vars(workdir, job)
         overrides = _parse_kv(sets)
         merged = jobs.apply_set(pv, overrides) if overrides else pv
-        template_id = template or pv.template or (
-            "gen-multi" if ref_assets else str(conf.get("mglc.prompt_template")))
+        template_id = template or pv.template or str(conf.get("mglc.prompt_template"))
         if (template_id != pv.template
                 and (template is not None or (ref_assets and pv.template is None))):
             jobs.save_prompt_vars(workdir, job,
@@ -211,11 +199,10 @@ def submit(
             available = sorted(p.stem for p in Path(templates_dir()).glob("*.md"))
             raise UsageError(f"模板 {template_id!r} 不存在；可用：{available}")
 
-        pkg = InputPackage(job=job, input=Path(input) if input else None,
-                           mask=Path(mask) if mask else None,
-                           canvas_size=canvas_size, source_size=source_size,
-                           workdir=jobs.job_dir(workdir, job), template=template_id,
-                           variables=dict(merged.vars), refs=ref_assets)
+        pkg = InputPackage(job=job, workdir=jobs.job_dir(workdir, job),
+                           template=template_id, variables=dict(merged.vars),
+                           refs=ref_assets, canvas_size=canvas_size,
+                           source_size=source_size)
         prepared = prepare_round(conf, pkg, log=log)
     except VrgenError as exc:
         _fail(exc)
@@ -247,7 +234,7 @@ def submit(
         session_id=int(prepared.run.params.get("session_id", 0) or 0),
         preview=True)
     ledger_refs = prepared.run.params.get("refs") or []
-    if ledger_refs and str(prepared.run.params.get("mode")) == "firstLastFrame":
+    if str(prepared.run.params.get("mode")) == "firstLastFrame":
         by_role = {str(item.get("role")): item for item in ledger_refs}
         first = by_role.get("first_frame")
         last = by_role.get("last_frame")
@@ -257,20 +244,18 @@ def submit(
             **common,
             first_image=(str(first["upload"]), None),
             last_image=(str(last["upload"]), None))
-    elif ledger_refs:
+    else:
         videos = [(str(item["upload"]),
                    prepared.run.assets.get(f"video:{item['id']}"))
                   for item in ledger_refs if item.get("kind") == "video"]
+        # mask 固定追加在所有图片之后（装配器已经排在最后，这里再保证一次）。
         images = [(str(item["upload"]),
                    prepared.run.assets.get(f"image:{item['id']}"))
-                  for item in ledger_refs if item.get("kind") == "image"]
+                  for item in ledger_refs
+                  if item.get("kind") == "image" and item.get("role") != "mask"]
+        images += [(str(item["upload"]), prepared.run.assets.get(f"image:{item['id']}"))
+                   for item in ledger_refs if item.get("role") == "mask"]
         gen_argv = build_generate_argv(**common, videos=videos, images=images)
-    else:
-        gen_argv = build_generate_argv(
-            **common, upload=prepared.run.upload.get("path", ""),
-            mask=(prepared.run.mask or {}).get("path"),
-            video_asset_id=prepared.run.assets.get("video"),
-            image_asset_id=prepared.run.assets.get("image"))
     command = shell_line([find_mglc(conf) or "mglc", "video", "generate", *gen_argv])
     print(f"\ncommand     {command}")
 
@@ -625,10 +610,10 @@ app.add_typer(params_app, name="params")
 @params_app.command("show")
 def params_show(
     job: str = typer.Option(..., "--job", help="job 名（调用方通常传 case 名）。"),
-    input: Path = typer.Option(None, "--input", exists=True, dir_okay=False,
-                               help="送生成的视频；省略时只返回模式与当前草稿。"),
-    canvas: str = typer.Option(None, "--canvas", help="画布尺寸 WxH；有 --input 时必填。"),
-    source: str = typer.Option(None, "--source", help="源尺寸 WxH；有 --input 时必填。"),
+    refs: Path = typer.Option(None, "--refs", exists=True, dir_okay=False,
+                              help="提交资产清单 JSON；省略时只返回模式与当前草稿。"),
+    canvas: str = typer.Option(None, "--canvas", help="画布尺寸 WxH；省略时由母版推导。"),
+    source: str = typer.Option(None, "--source", help="源尺寸 WxH；省略时等于画布。"),
     aspect_ratio: str = typer.Option(
         None, "--aspect-ratio",
         help="覆盖 fixed 里的输出比例；auto 表示跟随输入（gen 流用）。"),
@@ -637,8 +622,9 @@ def params_show(
 ) -> None:
     """输出分辨率档位 + 输入缩放档位的实际宽高，以及当前草稿/固定参数。
 
-    没有 ``--input`` 时（新建 gen case、素材还没加）只返回 ``modes`` 与
+    没有 ``--refs`` 时（新建 gen case、素材还没加）只返回 ``modes`` 与
     ``current``，``output``/``input`` 为空数组；页面据此先渲染模式下拉框。
+    输入档位只对视频母版有意义：母版是图片时 ``input`` 为空。
     """
     try:
         conf = config_mod.load(config)
@@ -665,8 +651,6 @@ def params_show(
                 "max_videos": (getattr(m, "max_videos", 0) if m.takes_video else 0),
                 "max_images": getattr(m, "max_images", 0),
                 "video_required": m.mode in ("videoEdit", "videoExtend"),
-                "roles": {kind: list(roles) for kind, roles in
-                          params_mod.MODE_ROLES.get(m.mode, {}).items()},
                 "duration": dict(m.duration or {}),
             }
             for m in model.modes.values()
@@ -691,19 +675,38 @@ def params_show(
             },
             "saved": jobs.generation_params_path(workdir, job).is_file(),
         }
-        if input is None:
+        if refs is None:
             payload = {"output": [], "input": [], **common}
         else:
-            if not limits.takes_video:
+            ref_assets = refs_mod.load_refs(refs)
+            videos = [a for a in ref_assets if a.kind == "video"]
+            if videos and not limits.takes_video:
                 raise UsageError(
                     f"model {model.code} mode {limits.mode} 不接受输入视频；"
-                    "firstLastFrame 请用 --refs 提交首尾帧")
-            if canvas is None or source is None:
-                raise UsageError("给了 --input 就要同时给 --canvas 与 --source")
-            canvas_size = _parse_wh(canvas, "--canvas")
-            _parse_wh(source, "--source")
-            spec = probe_input(input, conf)
-            duration_s = int(conf.get("mglc.duration_s")) or params_mod.derived_duration(spec)
+                    "firstLastFrame 请只提交首尾帧图片")
+            master = refs_mod.master(ref_assets)
+            if master.kind == "video":
+                master_spec = probe_input(master.path, conf)
+            else:
+                master_spec = probe_image(master.path, conf)
+            if canvas is not None or source is not None:
+                if canvas is None or source is None:
+                    raise UsageError("--canvas 与 --source 要么都给，要么都不给")
+                canvas_size = _parse_wh(canvas, "--canvas")
+                _parse_wh(source, "--source")
+            else:
+                canvas_size = (master_spec.width, master_spec.height)
+            input_options = (params_mod.input_options(
+                canvas_size, master_spec, limits.ref_video_limits())
+                if master.kind == "video" and limits.takes_video else [])
+            if limits.mode == "firstLastFrame" or not videos:
+                duration_s = 4
+            elif limits.mode == "allMediaRef":
+                specs = [probe_input(a.path, conf) for a in videos]
+                duration_s = params_mod.derived_duration(
+                    max(specs, key=lambda s: s.duration_s))
+            else:
+                duration_s = params_mod.derived_duration(master_spec)
             if aspect != "auto" and ":" in aspect:
                 left, _, right = aspect.partition(":")
                 ratio = int(left) / int(right)
@@ -715,8 +718,7 @@ def params_show(
             common["fixed"]["duration_s"] = duration_s
             payload = {
                 "output": outputs,
-                "input": params_mod.input_options(canvas_size, spec,
-                                                  limits.ref_video_limits()),
+                "input": input_options,
                 **common,
             }
     except VrgenError as exc:

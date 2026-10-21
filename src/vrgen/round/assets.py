@@ -141,16 +141,15 @@ def wait_active(client: Mglc, asset_id: int, *, timeout: float = 1800.0,
         time.sleep(interval)
 
 
-def ensure_assets(client: Mglc, run: Run, *, video: str | Path | None = None,
-                  mask: str | Path | None = None,
-                  refs: list[tuple[str, str, str | Path]] | None = None,
+def ensure_assets(client: Mglc, run: Run, *,
+                  refs: list[tuple[str, str, str | Path]],
                   poll: bool = True, timeout: float = 1800.0, interval: float = 15.0,
                   log=None) -> dict[str, int]:
     """Upload + approve whatever this run needs, verifying anything already recorded.
 
-    ``refs`` is the gen multi-asset form: ``[(key, kind, path)]`` where ``key`` is
-    the ledger key (``video:v1`` / ``image:i1``). ``video`` / ``mask`` remain the
-    single-video form used by patch and fullredraw.
+    ``refs`` is the submission manifest as ``[(key, kind, path)]`` where ``key`` is
+    the ledger key (``video:v1`` / ``image:i1`` / ``image:mask``). Three flows share
+    the same form since decision 33.
 
     **Recorded ids are verified, not trusted.** They are reusable across rounds -- but
     only within the same account: the first real "does not belong to the current
@@ -161,15 +160,7 @@ def ensure_assets(client: Mglc, run: Run, *, video: str | Path | None = None,
     object from the previous account). Failing here costs nothing; failing at submit
     costs the round.
     """
-    wanted: list[tuple[str, str, Path]] = []
-    if refs is not None:
-        for key, kind, path in refs:
-            wanted.append((key, kind, Path(path)))
-    else:
-        if video is not None:
-            wanted.append((KIND_VIDEO, KIND_VIDEO, Path(video)))
-        if mask is not None:
-            wanted.append((KIND_IMAGE, KIND_IMAGE, Path(mask)))
+    wanted = [(key, kind, Path(path)) for key, kind, path in refs]
 
     for key, kind, path in wanted:
         existing = cached(run, key)

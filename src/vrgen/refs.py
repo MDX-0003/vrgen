@@ -1,17 +1,21 @@
-"""gen 多素材清单：解析 ``--refs`` JSON、校验角色矩阵、生成提示词素材块。
+"""提交清单：解析 ``--refs`` JSON、四条语义校验、生成提示词素材块。
 
-素材清单是 vrstudio 与 vrgen 之间唯一的多素材入口（契约
+素材清单是 vrstudio 与 vrgen 之间的唯一提交入口（契约
 ``docs/case-model.md`` §4）。vrgen 不知道 case.toml 的存在，只认这份清单里的
-``id`` / ``kind`` / ``path`` / ``role`` / ``sha256``。
+``id`` / ``kind`` / ``path`` / ``role`` / ``sha256``。三个流程（patch/fullredraw/
+gen）共用同一种清单：流程产物 clip/pad 与文件素材没有区别，mask 是装配器自动
+附带的内部控制图。
 
-角色矩阵与 ``vrstudio.case.MODE_ROLES`` 是同一份规则的镜像；两仓库不能互相
-import（AGENTS.md 硬规则 1），改动时必须同时改两侧与 ``docs/case-model.md``。
+数量、格式、时长、比例的上限以模型详情的 validator 为唯一依据；这里只保留平台
+接不住的四条语义规则：firstLastFrame 恰好一对首尾帧、至多一个 edit_master 且
+必须是第一条视频、mask 只能是图片、``*_raw`` 角色不能进入 refs。
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,21 +25,16 @@ KINDS = ("video", "image")
 ROLES = (
     "edit_master", "motion_ref", "space_ref", "scene_ref", "subject_ref",
     "first_frame", "last_frame", "mid_frame", "first_frame_raw", "last_frame_raw",
+    "mask",
 )
 
-#: 本期支持的模式与允许的角色；与 vrstudio.case.MODE_ROLES 保持一致。
-MODE_ROLES: dict[str, dict[str, tuple[str, ...]]] = {
-    "videoEdit": {"video": ("edit_master",), "image": ("subject_ref",)},
-    "allMediaRef": {
-        "video": ("edit_master", "motion_ref", "space_ref", "scene_ref"),
-        "image": ("subject_ref", "space_ref", "scene_ref",
-                  "first_frame", "last_frame", "mid_frame",
-                  "first_frame_raw", "last_frame_raw"),
-    },
-    "videoExtend": {"video": ("edit_master",), "image": ("subject_ref",)},
-    "firstLastFrame": {"video": (), "image": ("first_frame", "last_frame")},
-}
-SUPPORTED_MODES = tuple(MODE_ROLES)
+#: 只给关键帧工作台当前端输入的角色；不能进入 refs 清单。
+RAW_ROLES = ("first_frame_raw", "last_frame_raw")
+
+SUPPORTED_MODES = ("videoEdit", "allMediaRef", "videoExtend", "firstLastFrame")
+
+#: 清单 id：字母开头，其余字母数字下划线连字符（用户素材 v1/i1、流程产物 clip/pad…）。
+_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 
 #: 提示词里的角色说明；顺序与 case.toml 的 assets 顺序一致。
 ROLE_PROMPT = {
@@ -49,6 +48,7 @@ ROLE_PROMPT = {
     "mid_frame": "中间过渡帧，仅在首尾间距过大时补充。",
     "first_frame_raw": "工作台输入底图（原始抽取帧），只提供场景与占位，不是生成素材。",
     "last_frame_raw": "工作台输入底图（原始抽取帧），只提供场景与占位，不是生成素材。",
+    "mask": "编辑区域标注，不作为画面内容参考。",
 }
 
 _ROLE_RULES = {
@@ -124,10 +124,10 @@ def load_refs(path: str | Path) -> tuple[RefAsset, ...]:
         seen.add(asset_id)
         if kind not in KINDS:
             raise UsageError(f"{path}: 素材 {asset_id} 的 kind 必须是 {' 或 '.join(KINDS)}")
-        prefix = "v" if kind == "video" else "i"
-        if not asset_id.startswith(prefix) or not asset_id[1:].isdigit():
+        if not _ID.match(asset_id):
             raise UsageError(
-                f"{path}: 素材 id {asset_id!r} 不合约（{kind} 用 {prefix}1、{prefix}2…）")
+                f"{path}: 素材 id {asset_id!r} 不合约"
+                f"（字母开头，其余字母数字下划线连字符，如 v1 / i1 / clip / mask）")
         if role not in ROLES:
             raise UsageError(f"{path}: 素材 {asset_id} 的 role {role!r} 不合约")
         if not raw:
@@ -148,43 +148,32 @@ def load_refs(path: str | Path) -> tuple[RefAsset, ...]:
 
 
 def validate_mode(refs: tuple[RefAsset, ...], mode: str) -> None:
-    """角色矩阵校验：模式、种类、角色、数量与顺序。"""
-    if mode not in MODE_ROLES:
+    """四条语义规则；数量与格式由模型详情 validator 负责。"""
+    if mode not in SUPPORTED_MODES:
         raise UsageError(
             f"模式 {mode!r} 不在本期支持范围（{', '.join(SUPPORTED_MODES)}）")
-    allowed = MODE_ROLES[mode]
+    for asset in refs:
+        if asset.role in RAW_ROLES:
+            raise UsageError(
+                f"素材 {asset.id} 的角色 {asset.role} 只用于关键帧工作台，不能提交")
+        if asset.role == "mask" and asset.kind != "image":
+            raise UsageError(f"素材 {asset.id} 的 mask 角色只能是图片")
     videos = [a for a in refs if a.kind == "video"]
+    masters = [a for a in videos if a.role == "edit_master"]
+    if len(masters) > 1:
+        raise UsageError("至多允许 1 个视频使用 edit_master")
+    if masters and videos[0] is not masters[0]:
+        raise UsageError("edit_master 必须是第一条视频")
     if mode == "firstLastFrame":
         first = [a for a in refs if a.role == "first_frame"]
         last = [a for a in refs if a.role == "last_frame"]
-        if videos:
-            raise UsageError("模式 firstLastFrame 不允许视频素材，只接受首帧与尾帧两张图片")
-        if len(refs) != 2 or len(first) != 1 or len(last) != 1:
+        if videos or len(refs) != 2 or len(first) != 1 or len(last) != 1:
             raise UsageError(
                 "模式 firstLastFrame 恰好需要 1 个 first_frame 和 1 个 last_frame，"
-                "且不能出现其他素材或角色")
+                "且不能出现视频、mask 或其他素材")
         if refs[0].role != "first_frame" or refs[1].role != "last_frame":
             raise UsageError(
                 "模式 firstLastFrame 的素材顺序必须是 first_frame 在前、last_frame 在后")
-        return
-    if not videos and mode != "allMediaRef":
-        raise UsageError(f"模式 {mode} 至少需要 1 个视频素材")
-    if mode in ("videoEdit", "videoExtend") and len(videos) != 1:
-        raise UsageError(f"模式 {mode} 恰好需要 1 个视频素材，当前 {len(videos)} 个")
-    for asset in refs:
-        if asset.role not in allowed[asset.kind]:
-            raise UsageError(
-                f"模式 {mode} 不允许 {asset.kind} 使用角色 {asset.role}；"
-                f"可选：{', '.join(allowed[asset.kind])}")
-    if mode in ("videoEdit", "videoExtend"):
-        if videos[0].role != "edit_master":
-            raise UsageError(f"模式 {mode} 的视频角色必须是 edit_master")
-        return
-    masters = [a for a in videos if a.role == "edit_master"]
-    if len(masters) > 1:
-        raise UsageError("allMediaRef 至多允许 1 个视频使用 edit_master")
-    if masters and videos[0] is not masters[0]:
-        raise UsageError("allMediaRef 的 edit_master 必须是第一条视频")
 
 
 def validate_counts(refs: tuple[RefAsset, ...], mode: str, *,
@@ -198,20 +187,20 @@ def validate_counts(refs: tuple[RefAsset, ...], mode: str, *,
 
 
 def master(refs: tuple[RefAsset, ...]) -> RefAsset:
-    """几何与上传基准：按契约的回退链取第一条可用素材。"""
+    """几何与上传基准：按契约的回退链取第一条可用素材（mask 不算候选）。"""
     videos = [a for a in refs if a.kind == "video"]
     for asset in videos:
         if asset.role == "edit_master":
             return asset
     if videos:
         return videos[0]
-    for asset in refs:
-        if asset.kind == "image" and asset.role in ("space_ref", "scene_ref"):
+    images = [a for a in refs if a.kind == "image" and a.role != "mask"]
+    for asset in images:
+        if asset.role in ("space_ref", "scene_ref"):
             return asset
-    for asset in refs:
-        if asset.kind == "image" and asset.role == "first_frame":
+    for asset in images:
+        if asset.role == "first_frame":
             return asset
-    images = [a for a in refs if a.kind == "image"]
     if images:
         return images[0]
     raise UsageError("素材清单里没有可用作母版的素材")
@@ -228,11 +217,12 @@ def asset_list(refs: tuple[RefAsset, ...]) -> str:
 
     视频与图片各自按清单顺序编号；清单块里视频在前、图片在后，避免一条图片
     把视频列表截成两段（mglc 的 ``--video`` / ``--image`` 本来就是两组）。
+    mask 是编辑区域控制图，不参与编号（模板用固定文案说明最后一张图）。
     """
     counters = {"video": 0, "image": 0}
     lines: list[str] = []
     ordered = ([a for a in refs if a.kind == "video"]
-               + [a for a in refs if a.kind == "image"])
+               + [a for a in refs if a.kind == "image" and a.role != "mask"])
     for asset in ordered:
         counters[asset.kind] += 1
         label = ("Video" if asset.kind == "video" else "Image") + str(counters[asset.kind])

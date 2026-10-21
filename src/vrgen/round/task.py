@@ -41,10 +41,6 @@ _WM_MARKERS = ("wm", "watermark", "watermarked")
 
 def build_generate_argv(*, prompt: str, model_id: int, mode: str, duration_s: int,
                         resolution: str, aspect_ratio: str, num: int,
-                        upload: str | Path | None = None,
-                        mask: str | Path | None = None,
-                        video_asset_id: int | None = None,
-                        image_asset_id: int | None = None,
                         videos: list[tuple[str | Path, int | None]] | None = None,
                         images: list[tuple[str | Path, int | None]] | None = None,
                         first_image: tuple[str | Path, int | None] | None = None,
@@ -54,15 +50,13 @@ def build_generate_argv(*, prompt: str, model_id: int, mode: str, duration_s: in
                         preview: bool = False) -> list[str]:
     """The ``mglc video generate`` arguments for one round.
 
-    Three input shapes share this builder:
+    两种输入形状共享这个 builder：
 
-    * ``upload`` / ``mask`` + ``*_asset_id`` -- the patch/fullredraw single-video
-      path, kept for compatibility;
-    * ``videos`` / ``images`` -- gen multi-asset lists, each ``(path, asset_id)``
-      in prompt order. The first video is the master;
-    * ``first_image`` / ``last_image`` -- firstLastFrame's two fixed frames. They
-      map to ``--first-image`` / ``--last-image`` and deliberately do not produce
-      ``--video`` / ``--image`` / ``--asset-id`` pairs.
+    * ``videos`` / ``images`` -- 提交清单，每项 ``(path, asset_id)``，按提示词
+      编号顺序（视频在前、图片在后，mask 追加在图片末尾）；
+    * ``first_image`` / ``last_image`` -- firstLastFrame 的两张固定帧。它们映射到
+      ``--first-image`` / ``--last-image``，不产生 ``--video`` / ``--image`` /
+      ``--asset-id`` 对。
 
     ``--duration`` is passed even for an editing task, where the platform reports
     ``duration.type = ""`` (i.e. the timeline is the input's): the CLI marks the flag
@@ -88,7 +82,7 @@ def build_generate_argv(*, prompt: str, model_id: int, mode: str, duration_s: in
             "--num", str(int(num))]
 
     if mode == "firstLastFrame":
-        if videos or images or upload is not None or mask is not None:
+        if videos or images:
             raise AigcError("firstLastFrame only accepts first_image/last_image; "
                             "video and ordinary image references are not allowed")
         if first_image is None or last_image is None:
@@ -100,10 +94,8 @@ def build_generate_argv(*, prompt: str, model_id: int, mode: str, duration_s: in
             argv += ["--session-id", str(int(session_id))]
         return argv
 
-    if videos is None:
-        videos = [(upload, video_asset_id)] if upload is not None else []
-    if images is None:
-        images = [(mask, image_asset_id)] if mask is not None else []
+    videos = videos or []
+    images = images or []
     if not videos and not images:
         raise AigcError("a generation round needs at least one reference video or image")
 
@@ -167,59 +159,45 @@ def submit(client: Mglc, run: Run, *, confirm: bool = False, timeout: float = 30
     double-charge either.
     """
     assert_spendable(run)
-    upload = run.upload.get("path")
-    if not upload:
-        raise AigcError(f"run {run.key} has no prepared upload; run `vrgen submit` again")
     refs = run.params.get("refs") or []
-    if refs:
-        mode = str(run.params["mode"])
-        first_image = last_image = None
-        if mode == "firstLastFrame":
-            by_role = {str(item.get("role")): item for item in refs}
-            first = by_role.get("first_frame")
-            last = by_role.get("last_frame")
-            if first is None or last is None:
-                raise AigcError("firstLastFrame round is missing its first_frame or last_frame")
-            first_image = (str(first["upload"]), None)
-            last_image = (str(last["upload"]), None)
-            videos: list[tuple[str | Path, int | None]] = []
-            images: list[tuple[str | Path, int | None]] = []
-        else:
-            videos = [(str(item["upload"]), run.assets.get(f"video:{item['id']}"))
-                      for item in refs if item.get("kind") == "video"]
-            images = [(str(item["upload"]), run.assets.get(f"image:{item['id']}"))
-                      for item in refs if item.get("kind") == "image"]
-        argv = build_generate_argv(
-            prompt=run.prompt,
-            model_id=int(run.params["model_id"]),
-            mode=mode,
-            duration_s=int(run.params["duration_s"]),
-            resolution=str(run.params["resolution"]),
-            aspect_ratio=str(run.params["aspect_ratio"]),
-            num=int(run.params.get("num", 1)),
-            videos=videos,
-            images=images,
-            first_image=first_image,
-            last_image=last_image,
-            keep_sound=bool(run.params.get("keep_sound", True)),
-            session_id=int(run.params.get("session_id", 0) or 0),
-        )
+    if not refs:
+        raise AigcError(f"run {run.key} has no prepared refs; run `vrgen submit` again")
+    mode = str(run.params["mode"])
+    first_image = last_image = None
+    if mode == "firstLastFrame":
+        by_role = {str(item.get("role")): item for item in refs}
+        first = by_role.get("first_frame")
+        last = by_role.get("last_frame")
+        if first is None or last is None:
+            raise AigcError("firstLastFrame round is missing its first_frame or last_frame")
+        first_image = (str(first["upload"]), None)
+        last_image = (str(last["upload"]), None)
+        videos: list[tuple[str | Path, int | None]] = []
+        images: list[tuple[str | Path, int | None]] = []
     else:
-        argv = build_generate_argv(
-            prompt=run.prompt,
-            model_id=int(run.params["model_id"]),
-            mode=str(run.params["mode"]),
-            duration_s=int(run.params["duration_s"]),
-            resolution=str(run.params["resolution"]),
-            aspect_ratio=str(run.params["aspect_ratio"]),
-            num=int(run.params.get("num", 1)),
-            upload=upload,
-            mask=(run.mask or {}).get("path"),
-            video_asset_id=run.assets.get("video"),
-            image_asset_id=run.assets.get("image"),
-            keep_sound=bool(run.params.get("keep_sound", True)),
-            session_id=int(run.params.get("session_id", 0) or 0),
-        )
+        videos = [(str(item["upload"]), run.assets.get(f"video:{item['id']}"))
+                  for item in refs if item.get("kind") == "video"]
+        # mask 固定追加在所有图片之后；其余图片保持清单顺序。
+        images = [(str(item["upload"]), run.assets.get(f"image:{item['id']}"))
+                  for item in refs
+                  if item.get("kind") == "image" and item.get("role") != "mask"]
+        images += [(str(item["upload"]), run.assets.get(f"image:{item['id']}"))
+                   for item in refs if item.get("role") == "mask"]
+    argv = build_generate_argv(
+        prompt=run.prompt,
+        model_id=int(run.params["model_id"]),
+        mode=mode,
+        duration_s=int(run.params["duration_s"]),
+        resolution=str(run.params["resolution"]),
+        aspect_ratio=str(run.params["aspect_ratio"]),
+        num=int(run.params.get("num", 1)),
+        videos=videos,
+        images=images,
+        first_image=first_image,
+        last_image=last_image,
+        keep_sound=bool(run.params.get("keep_sound", True)),
+        session_id=int(run.params.get("session_id", 0) or 0),
+    )
     write_command(run, [client.exe(), "video", "generate", *argv], spend=True)
     if log is not None:
         log.step("submitting (this spends quota)")

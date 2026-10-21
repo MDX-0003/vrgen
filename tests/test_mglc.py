@@ -264,29 +264,32 @@ def test_spend_guard_blocks_a_second_submission(tmp_path):
 
 def test_build_generate_argv_requires_asset_ids():
     common = dict(prompt="p", model_id=37, mode="videoEdit", duration_s=8,
-                  resolution="720p", aspect_ratio="21:9", num=1, upload="up.mp4",
-                  mask="mask.png")
+                  resolution="720p", aspect_ratio="21:9", num=1)
     with pytest.raises(AigcError):
-        task_mod.build_generate_argv(**common)
-    argv = task_mod.build_generate_argv(**common, video_asset_id=11, image_asset_id=22)
+        task_mod.build_generate_argv(**common, videos=[("up.mp4", None)])
+    argv = task_mod.build_generate_argv(
+        **common, videos=[("up.mp4", 11)], images=[("mask.png", 22)])
     joined = " ".join(argv)
     assert "--type videoEdit" in joined
     assert "--video-asset-id 11" in joined and "--asset-id 22" in joined
     assert "--keep-original-sound" in joined
+    preview = task_mod.build_generate_argv(
+        **common, videos=[("up.mp4", None)], preview=True)
+    assert "--video-asset-id <video-asset-id>" in " ".join(preview)
 
 
 def test_build_generate_argv_auto_aspect_omits_the_flag():
     """videoEdit 的 ratios 为空、输出跟随输入；auto 表示不向 mglc 传该 flag。"""
     argv = task_mod.build_generate_argv(
         prompt="p", model_id=37, mode="videoEdit", duration_s=13,
-        resolution="1080p", aspect_ratio="auto", num=1, upload="up.mp4",
-        video_asset_id=11)
+        resolution="1080p", aspect_ratio="auto", num=1,
+        videos=[("up.mp4", 11)])
     assert "--aspect-ratio" not in argv
 
     argv = task_mod.build_generate_argv(
         prompt="p", model_id=37, mode="videoEdit", duration_s=13,
-        resolution="1080p", aspect_ratio="21:9", num=1, upload="up.mp4",
-        video_asset_id=11)
+        resolution="1080p", aspect_ratio="21:9", num=1,
+        videos=[("up.mp4", 11)])
     assert "--aspect-ratio" in argv and "21:9" in argv
 
 
@@ -328,15 +331,15 @@ def test_build_generate_argv_requires_any_reference():
 def test_build_generate_argv_passes_project_session_id():
     argv = task_mod.build_generate_argv(
         prompt="p", model_id=37, mode="videoEdit", duration_s=13,
-        resolution="1080p", aspect_ratio="auto", num=1, upload="up.mp4",
-        video_asset_id=11, session_id=2060150528006080)
+        resolution="1080p", aspect_ratio="auto", num=1,
+        videos=[("up.mp4", 11)], session_id=2060150528006080)
     joined = " ".join(argv)
     assert "--session-id 2060150528006080" in joined
 
     argv = task_mod.build_generate_argv(
         prompt="p", model_id=37, mode="videoEdit", duration_s=13,
-        resolution="1080p", aspect_ratio="auto", num=1, upload="up.mp4",
-        video_asset_id=11, session_id=0)
+        resolution="1080p", aspect_ratio="auto", num=1,
+        videos=[("up.mp4", 11)], session_id=0)
     assert "--session-id" not in argv
 
 
@@ -405,7 +408,7 @@ def _asset_run(tmp_path, asset_id: int | None = 11):
     video.write_bytes(b"v")
     store = RunStore(tmp_path / "runs")
     run = store.create(run_key("p", video, None, {}), params={}, prompt="p", upload=video)
-    run.assets = {"video": asset_id} if asset_id else {}
+    run.assets = {"video:v1": asset_id} if asset_id else {}
     run.save()
     return run
 
@@ -414,9 +417,10 @@ def test_recorded_asset_is_verified_and_replaced_when_foreign(tmp_path):
     calls: list[str] = []
     run = _asset_run(tmp_path, asset_id=99)
     client = Mglc(binary="mglc-fake", runner=_dispatch(calls, stale_ids=(99,)))
-    ids = ensure_assets(client, run, video=run.upload["path"], poll=False,
-                        log=Log(quiet=True))
-    assert ids["video"] == 11
+    ids = ensure_assets(client, run,
+                        refs=[("video:v1", "video", run.upload["path"])],
+                        poll=False, log=Log(quiet=True))
+    assert ids["video:v1"] == 11
     assert any("no longer usable" in n for n in run.notes)
 
 
@@ -424,9 +428,10 @@ def test_recorded_asset_that_is_still_valid_is_not_re_uploaded(tmp_path):
     calls: list[str] = []
     run = _asset_run(tmp_path, asset_id=99)
     client = Mglc(binary="mglc-fake", runner=_dispatch(calls))
-    ids = ensure_assets(client, run, video=run.upload["path"], poll=False,
-                        log=Log(quiet=True))
-    assert ids["video"] == 99
+    ids = ensure_assets(client, run,
+                        refs=[("video:v1", "video", run.upload["path"])],
+                        poll=False, log=Log(quiet=True))
+    assert ids["video:v1"] == 99
     assert not any("virtual-ip upload" in c for c in calls)
 
 
@@ -449,9 +454,10 @@ def test_an_unreadable_review_status_is_not_mistaken_for_pending(tmp_path):
     client = Mglc(binary="mglc-fake", runner=runner)
     assert classify("") == "unknown"
     assert asset_state(client, 99) == "unreadable"
-    ids = ensure_assets(client, run, video=run.upload["path"], poll=False,
-                        log=Log(quiet=True))
-    assert ids["video"] == 11
+    ids = ensure_assets(client, run,
+                        refs=[("video:v1", "video", run.upload["path"])],
+                        poll=False, log=Log(quiet=True))
+    assert ids["video:v1"] == 11
 
 
 def test_extract_asset_id_and_status_readers():
@@ -484,7 +490,7 @@ def _model_cache(workdir: Path, *, max_pixel: int = 8_295_044) -> None:
 
 
 def _offline(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
-    """模板指到 tmp；probe/scale 全离线。返回 (runs 目录, 输入视频)。"""
+    """模板指到 tmp；probe/scale 全离线。返回 (母版视频, mask)。"""
     templates = tmp_path / "templates"
     templates.mkdir()
     (templates / "t.md").write_text(_TEMPLATE, encoding="utf-8")
@@ -494,13 +500,25 @@ def _offline(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
     def fake_probe(path, conf):
         name = Path(path).name
         if name.startswith("upload_"):
-            width, height = (int(p) for p in name[len("upload_"):].split(".")[0].split("x"))
+            width, height = (int(p) for p in
+                             name[len("upload_"):].split(".")[0].rsplit("_", 1)[1].split("x"))
             return InputSpec(width=width, height=height, fps=30.0, duration_s=7.979,
                              size_bytes=7_700_000, container=("mp4",))
         return InputSpec(width=CANVAS[0], height=CANVAS[1], fps=30.0, duration_s=7.979,
                          size_bytes=228_200_000, container=("mp4",))
 
+    def fake_probe_image(path, conf):
+        name = Path(path).name
+        if name.startswith("upload_"):
+            width, height = (int(p) for p in
+                             name[len("upload_"):].split(".")[0].rsplit("_", 1)[1].split("x"))
+        else:
+            width, height = CANVAS
+        return InputSpec(width=width, height=height, fps=0.0, duration_s=0.0,
+                         size_bytes=100_000, container=("png",))
+
     monkeypatch.setattr(pipe, "probe_input", fake_probe)
+    monkeypatch.setattr(pipe, "probe_image", fake_probe_image)
 
     def fake_scale(src, dst, size, **kw):
         Path(dst).parent.mkdir(parents=True, exist_ok=True)
@@ -509,6 +527,7 @@ def _offline(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
 
     monkeypatch.setattr(pipe, "scale_video", fake_scale)
     monkeypatch.setattr(pipe, "scale_image", fake_scale)
+    monkeypatch.setattr(pipe, "scale_reference_image", fake_scale)
 
     video = tmp_path / "canvas.mp4"
     video.write_bytes(b"canvas-bytes")
@@ -518,9 +537,12 @@ def _offline(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _pkg(tmp_path: Path, video: Path, mask: Path | None, workdir: Path) -> InputPackage:
-    return InputPackage(job="j", input=video, mask=mask, canvas_size=CANVAS,
-                        source_size=SOURCE, workdir=workdir / "j", template="t",
-                        variables={"theme": "黄昏"})
+    refs = [RefAsset("clip", "video", "edit_master", video)]
+    if mask is not None:
+        refs.append(RefAsset("mask", "image", "mask", mask))
+    return InputPackage(job="j", canvas_size=CANVAS, source_size=SOURCE,
+                        workdir=workdir / "j", template="t",
+                        variables={"theme": "黄昏"}, refs=tuple(refs))
 
 
 def test_prepare_round_reads_the_constants_from_config(tmp_path, monkeypatch):
@@ -537,6 +559,11 @@ def test_prepare_round_reads_the_constants_from_config(tmp_path, monkeypatch):
     assert prepared.run.dir.name.startswith("t-")           # 以模板名命名
     assert "2334" in prepared.run.prompt
     assert "黄昏" in prepared.run.prompt
+    refs = prepared.run.params["refs"]
+    assert [r["id"] for r in refs] == ["clip", "mask"]
+    assert refs[1]["role"] == "mask" and "input" not in prepared.run.params
+    assert "mask" not in prepared.run.prompt             # mask 不参与编号
+    assert (prepared.run.dir / "refs.json").is_file()
 
 
 def _model_cache_multi(workdir: Path) -> None:
@@ -610,8 +637,8 @@ def test_prepare_round_gen_multi_assets(tmp_path, monkeypatch):
     refs = (RefAsset("v1", "video", "edit_master", v1),
             RefAsset("v2", "video", "motion_ref", v2),
             RefAsset("i1", "image", "subject_ref", i1))
-    pkg = InputPackage(job="j", input=None, mask=None, canvas_size=None,
-                       source_size=None, workdir=runs / "j", template="t",
+    pkg = InputPackage(job="j", canvas_size=None, source_size=None,
+                       workdir=runs / "j", template="t",
                        variables={}, refs=refs)
     conf = config_mod.load(overrides=["mglc.mode=allMediaRef",
                                       "mglc.aspect_ratio=16:9"])
@@ -643,8 +670,8 @@ def _firstlast_refs(tmp_path):
 
 
 def _firstlast_pkg(tmp_path, runs, refs):
-    return InputPackage(job="j", input=None, mask=None, canvas_size=None,
-                        source_size=None, workdir=runs / "j", template="t",
+    return InputPackage(job="j", canvas_size=None, source_size=None,
+                        workdir=runs / "j", template="t",
                         variables={}, refs=refs)
 
 
@@ -681,7 +708,6 @@ def test_prepare_round_gen_image_only(tmp_path, monkeypatch):
     assert prepared.run.params["duration_source"] == "none"
     assert prepared.run.params["keep_sound"] is False
     assert prepared.run.params["master"] == "i1"
-    assert prepared.run.params["input"] is None
     assert prepared.run.upload["path"] == str(refs[0].path)
     assert prepared.geometry.canvas_size == (1920, 1080)
     assert "首帧定稿图" in prepared.run.prompt
@@ -702,7 +728,7 @@ def test_duration_explicit_out_of_range(tmp_path, monkeypatch):
                            log=Log(quiet=True))
 
 
-def test_prepare_round_gen_rejects_bad_role_matrix(tmp_path, monkeypatch):
+def test_prepare_round_rejects_two_edit_masters(tmp_path, monkeypatch):
     templates = tmp_path / "templates"
     templates.mkdir()
     (templates / "t.md").write_text("{asset_list}", encoding="utf-8")
@@ -717,12 +743,12 @@ def test_prepare_round_gen_rejects_bad_role_matrix(tmp_path, monkeypatch):
     v1.write_bytes(b"v1")
     v2.write_bytes(b"v2")
     refs = (RefAsset("v1", "video", "edit_master", v1),
-            RefAsset("v2", "video", "motion_ref", v2))
-    pkg = InputPackage(job="j", input=None, mask=None, canvas_size=None,
-                       source_size=None, workdir=runs / "j", template="t",
+            RefAsset("v2", "video", "edit_master", v2))
+    pkg = InputPackage(job="j", canvas_size=None, source_size=None,
+                       workdir=runs / "j", template="t",
                        variables={}, refs=refs)
-    conf = config_mod.load(overrides=["mglc.mode=videoEdit"])
-    with pytest.raises(UsageError, match="恰好需要 1 个视频"):
+    conf = config_mod.load(overrides=["mglc.mode=allMediaRef"])
+    with pytest.raises(UsageError, match="至多"):
         pipe.prepare_round(conf, pkg, log=Log(quiet=True))
 
 
@@ -815,13 +841,14 @@ def test_a_round_past_prepare_still_re_verifies_its_assets(tmp_path, monkeypatch
     calls: list[str] = []
     conf, pkg, prepared, _ = _fake_round(monkeypatch, tmp_path, calls=calls)
     prepared.run.advance("assets_ready")
-    prepared.run.assets = {"video": 99, "image": 98}
+    prepared.run.assets = {"video:clip": 99, "image:mask": 98}
     prepared.run.save()
 
     client = Mglc(binary="mglc-fake", runner=_dispatch(calls, stale_ids=(98, 99)))
     outcome = pipe.execute_round(conf, pkg, prepared, client=client, log=Log(quiet=True))
     assert sum("virtual-ip upload" in c for c in calls) == 2
-    assert outcome.run.assets["video"] == 11 and outcome.run.assets["image"] == 22
+    assert outcome.run.assets["video:clip"] == 11
+    assert outcome.run.assets["image:mask"] == 22
 
 
 # ------------------------------------------------------- round: the call log
@@ -870,6 +897,17 @@ def test_mglc_config_validation(key, value):
 # --------------------------------------------------------------------- CLI
 
 
+def _refs_file(tmp_path: Path, video: Path, mask: Path | None) -> Path:
+    assets = [{"id": "clip", "kind": "video", "role": "edit_master",
+               "path": str(video)}]
+    if mask is not None:
+        assets.append({"id": "mask", "kind": "image", "role": "mask",
+                       "path": str(mask)})
+    path = tmp_path / "refs.json"
+    path.write_text(json.dumps({"assets": assets}, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
 def test_cli_dry_run_needs_no_binary_and_sends_nothing(tmp_path, monkeypatch):
     video, mask = _offline(monkeypatch, tmp_path)
     runs = tmp_path / "runs"
@@ -881,7 +919,7 @@ def test_cli_dry_run_needs_no_binary_and_sends_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(binpath.shutil, "which", lambda name: None)
 
     result = CliRunner().invoke(vrgen_cli.app, [
-        "submit", "--job", "j", "--input", str(video), "--mask", str(mask),
+        "submit", "--job", "j", "--refs", str(_refs_file(tmp_path, video, mask)),
         "--canvas", "4668x2000", "--source", "4000x2000",
         "--template", "t", "--dry-run", "--workdir", str(runs)])
     assert result.exit_code == 0, result.output
@@ -905,7 +943,7 @@ def test_cli_dry_run_reads_scale_from_config(tmp_path, monkeypatch):
     cfg.write_text('[mglc]\nscale = "half"\n', encoding="utf-8")
 
     result = CliRunner().invoke(vrgen_cli.app, [
-        "submit", "--job", "j", "--input", str(video), "--mask", str(mask),
+        "submit", "--job", "j", "--refs", str(_refs_file(tmp_path, video, mask)),
         "--canvas", "4668x2000", "--source", "4000x2000",
         "--template", "t", "--dry-run", "--workdir", str(runs),
         "--config", str(cfg)])
@@ -926,7 +964,7 @@ def test_cli_submit_explicit_params_override_config(tmp_path, monkeypatch):
     cfg.write_text('[mglc]\nresolution = "480p"\nscale = "auto"\n', encoding="utf-8")
 
     result = CliRunner().invoke(vrgen_cli.app, [
-        "submit", "--job", "j", "--input", str(video), "--mask", str(mask),
+        "submit", "--job", "j", "--refs", str(_refs_file(tmp_path, video, mask)),
         "--canvas", "4668x2000", "--source", "4000x2000",
         "--template", "t", "--dry-run", "--workdir", str(runs),
         "--config", str(cfg),

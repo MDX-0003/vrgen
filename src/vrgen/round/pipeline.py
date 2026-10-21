@@ -11,12 +11,13 @@
 阶段不变：prepared（本地免费）→ assets（平台状态）→ submitted（花钱、不可逆）
 → succeeded（轮询）→ fetched（结果落盘）→ checked（通用闸门入账）。
 
-gen 多素材（决策 24/25）在 prepared 阶段多了两件事：按角色矩阵校验素材清单，
-以及把每条素材各自缩放到模型限额内；母版的上传尺寸决定提示词几何。
+决策 33 起只有一条 local half：提交 = ``--refs`` 清单（三个流程同构）。流程差异
+（母版、mask、几何）都已由调用方折算进清单与 canvas/source；这里不感知 flow。
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -52,34 +53,22 @@ assert STAGES, "stage names live in ledger.py (the lifecycle owner); imported he
 
 
 @dataclass(frozen=True)
-class PreparedRef:
-    """One gen asset after the local half: its measured source and upload file."""
-
-    asset: refs_mod.RefAsset
-    upload: Path
-    width: int
-    height: int
-    spec: InputSpec
-
-
-@dataclass(frozen=True)
 class InputPackage:
     """一轮生成的全部显式输入（契约：docs/case-model.md §4 的 submit 参数）。
 
-    ``canvas_size``/``source_size`` 是提示词几何占位符的唯一来源——对应 vrpad
-    时代从 manifest 读的那两个数（band_w = canvas_w - source_w）。gen 多素材时
-    它们可以为 None（由母版推导），``refs`` 非空而 ``input``/``mask`` 为空。
+    ``refs`` 是唯一素材入口，顺序即 ``[submit] selected`` 的顺序（mask 由装配器
+    追加在最后）。``canvas_size``/``source_size`` 是提示词几何占位符的唯一来源；
+    省略时按母版推导（gen 流）。``band_w = canvas_w - source_w``，两者相等时
+    没有冗余带。
     """
 
     job: str
-    input: Path | None
-    mask: Path | None
-    canvas_size: tuple[int, int] | None
-    source_size: tuple[int, int] | None
     workdir: Path                      # 台账根（runs/）
     template: str                      # 模板 id（templates/<id>.md）
     variables: dict[str, str]          # prompt-vars 的 [vars]（含本次 --set 合并）
-    refs: tuple[refs_mod.RefAsset, ...] = ()
+    refs: tuple[refs_mod.RefAsset, ...]
+    canvas_size: tuple[int, int] | None = None
+    source_size: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -92,7 +81,6 @@ class Prepared:
     spec: InputSpec
     run: Run
     reused: bool = False               # this key already had a run directory
-    refs: tuple[PreparedRef, ...] = ()
 
 
 @dataclass
@@ -131,7 +119,7 @@ def _gen_duration(conf, limits: ModeLimits, *, source: str,
                   master_spec: InputSpec,
                   planned: list[tuple[refs_mod.RefAsset, InputSpec, tuple[int, int], bool]]
                   ) -> tuple[int, str]:
-    """Resolve a refs round's duration: explicit > longest video > default 4."""
+    """Resolve a round's duration: explicit > longest video > default 4."""
     configured = int(conf.get("mglc.duration_s", 0) or 0)
     if configured:
         span = _duration_range(limits)
@@ -167,106 +155,13 @@ def prepare_round(conf, pkg: InputPackage, *, log) -> Prepared:
     Idempotent by run key: same inputs + same rendered prompt + same parameters
     resolve to the same key and reuse the first run's directory.
     """
-    if pkg.refs:
-        return _prepare_gen(conf, pkg, log=log)
-    return _prepare_single(conf, pkg, log=log)
+    if not pkg.refs:
+        raise UsageError("提交清单为空：勾选要提交的素材后再提交")
+    return _prepare_refs(conf, pkg, log=log)
 
 
-def _prepare_single(conf, pkg: InputPackage, *, log) -> Prepared:
-    if pkg.input is None or pkg.canvas_size is None or pkg.source_size is None:
-        raise AigcError("单视频输入包缺 input/canvas/source")
-    models = load_models(pkg.workdir, url=str(conf.get("mglc.model_list_url")),
-                         max_age_h=float(conf.get("mglc.models_max_age_h", 24.0)), log=log)
-    model = find_model(models, int(conf.get("mglc.model_id")))
-    limits = model.mode(str(conf.get("mglc.mode")))
-    aspect = effective_aspect(str(conf.get("mglc.aspect_ratio")), limits.ratios)
-    if limits.ratios and aspect not in limits.ratios:
-        raise AigcError(
-            f"mode {limits.mode} 只接受这些输出比例：{', '.join(limits.ratios)}；"
-            f"当前是 {aspect!r}")
-    if not limits.takes_video:
-        raise AigcError(
-            f"model {model.code} ({model.name}) mode {limits.mode!r} does not accept an "
-            f"input video; modes that do: {', '.join(model.video_input_modes) or '(none)'}"
-            + ("\n  hint: Seedance 2.5 (code 37) with mode videoEdit is the locked edit "
-               "path" if model.code != 37 else "")
-        )
-    validator = limits.ref_video_limits()
-
-    spec = probe_input(pkg.input, conf)
-    mode_name, explicit = parse_size_mode(str(conf.get("mglc.scale")))
-    upload_size = explicit or choose_upload_size(
-        pkg.canvas_size, mode=mode_name, spec=spec,
-        max_pixels=int(validator.get("maxPixel") or 0),
-        max_bytes=int(validator.get("maxBytes") or 0))
-    geometry = scaled_geometry(pkg.canvas_size, pkg.source_size, upload_size)
-
-    template_path = resolve_template(f"{pkg.template}.md", templates_dir())
-    if not template_path.is_file():
-        raise AigcError(f"prompt template not found: {template_path} "
-                        f"(templates/<id>.md)")
-    variables: dict[str, object] = dict(geometry_variables(geometry))
-    variables.update(pkg.variables)
-    prompt = render(template_path.read_text(encoding="utf-8"), variables)
-
-    params = {
-        "backend": "mglc",
-        "model_id": model.code,
-        "mode": limits.mode,
-        "resolution": str(conf.get("mglc.resolution")),
-        "duration_s": _duration_s(conf, spec),
-        "aspect_ratio": aspect,
-        "num": int(conf.get("mglc.num", 1)),
-        "session_id": int(conf.get("mglc.session_id", 0)),
-        "scale": f"{upload_size[0]}x{upload_size[1]}",
-        # Not cosmetic: without it the model returns a silent file and recompose,
-        # which copies the audio of what came back, delivers a silent panorama.
-        "keep_sound": bool(conf.get("mglc.keep_original_sound", True)),
-        "input": str(pkg.input),
-        "mask": str(pkg.mask) if pkg.mask else None,
-        "canvas": f"{pkg.canvas_size[0]}x{pkg.canvas_size[1]}",
-        "source": f"{pkg.source_size[0]}x{pkg.source_size[1]}",
-        "template": pkg.template,
-    }
-
-    store = RunStore(pkg.workdir)
-    key = run_key(prompt, pkg.input, pkg.mask, params)
-    existing = store.find_by_key(key)
-    if existing is not None:
-        log.warn(f"this round already exists: {existing.dir.name} "
-                 f"(stage {existing.stage}) -- reusing it")
-        return Prepared(model, limits, geometry, spec, existing, reused=True)
-
-    run = store.create(key, label=pkg.template, params=params, prompt=prompt)
-    log.step(f"round {run.dir.name}")
-
-    if (spec.width, spec.height) != upload_size:
-        upload_path = scale_video(
-            pkg.input, run.dir / f"upload_{upload_size[0]}x{upload_size[1]}.mp4", upload_size,
-            config=conf, crf=int(conf.get("mglc.upload_crf", 16)), log=log)
-        measured = probe_input(upload_path, conf)
-        recheck = check_input(measured, validator)
-        if not recheck.ok:
-            raise BudgetError("the rescaled upload still does not fit:\n"
-                              + "\n".join("  " + c.line() for c in recheck.failures))
-        run.upload = {"path": str(upload_path), "width": measured.width,
-                      "height": measured.height}
-    else:
-        run.upload = {"path": str(pkg.input), "width": spec.width, "height": spec.height}
-
-    if pkg.mask is not None:
-        mask_path = Path(pkg.mask)
-        if geometry.canvas_size != tuple(pkg.canvas_size):
-            mask_path = scale_image(pkg.mask, run.dir / "upload_mask.png",
-                                    geometry.canvas_size, config=conf)
-        run.mask = {"path": str(mask_path)}
-    run.save()
-    log.info(f"prompt -> {run.prompt_path}")
-    return Prepared(model, limits, geometry, spec, run)
-
-
-def _prepare_gen(conf, pkg: InputPackage, *, log) -> Prepared:
-    """多素材本地半场：角色矩阵 → 各自缩放 → 母版几何 → 提示词 → 台账。"""
+def _prepare_refs(conf, pkg: InputPackage, *, log) -> Prepared:
+    """单一本地半场：校验 → 各自缩放 → 母版几何 → 提示词 → 台账。"""
     models = load_models(pkg.workdir, url=str(conf.get("mglc.model_list_url")),
                          max_age_h=float(conf.get("mglc.models_max_age_h", 24.0)), log=log)
     model = find_model(models, int(conf.get("mglc.model_id")))
@@ -276,9 +171,6 @@ def _prepare_gen(conf, pkg: InputPackage, *, log) -> Prepared:
                              max_videos=limits.max_videos,
                              max_images=limits.max_images)
     aspect = effective_aspect(str(conf.get("mglc.aspect_ratio")), limits.ratios)
-    if not limits.ratios:
-        # videoEdit / videoExtend / firstLastFrame 的输出比例跟随输入；auto = 不传该 flag。
-        aspect = "auto"
     if limits.ratios and aspect not in limits.ratios:
         raise AigcError(
             f"mode {limits.mode} 只接受这些输出比例：{', '.join(limits.ratios)}；"
@@ -288,7 +180,7 @@ def _prepare_gen(conf, pkg: InputPackage, *, log) -> Prepared:
     image_validator = limits.ref_image_limits()
     mode_name, explicit = parse_size_mode(str(conf.get("mglc.scale")))
     if explicit and sum(1 for a in pkg.refs if a.kind == "video") > 1:
-        raise AigcError("gen 多视频不支持显式 WxH --scale；用 auto | full | half")
+        raise AigcError("多视频提交不支持显式 WxH --scale；用 auto | full | half")
     max_pixels = int(video_validator.get("maxPixel") or 0)
     max_bytes = int(video_validator.get("maxBytes") or 0)
 
@@ -299,8 +191,10 @@ def _prepare_gen(conf, pkg: InputPackage, *, log) -> Prepared:
     # run_key 要等提示词渲染完才算；缩放在这之前完成，落在轮次目录里。先算 key
     # 需要 run 目录，所以先建一个临时 store 目录名——与旧路径一样，用最终 key
     # 建目录；缩放件在目录建好后再写。这里先收集目标尺寸，建 run 后再落盘。
-    planned: list[tuple[refs_mod.RefAsset, InputSpec, tuple[int, int], bool]] = []
+    planned: dict[str, tuple[refs_mod.RefAsset, InputSpec, tuple[int, int], bool]] = {}
     for asset in pkg.refs:
+        if asset.role == "mask":
+            continue                      # mask 的上传尺寸取决于母版，稍后补
         if asset.kind == "video":
             spec = probe_input(asset.path, conf)
             report = check_input(spec, video_validator)
@@ -318,7 +212,6 @@ def _prepare_gen(conf, pkg: InputPackage, *, log) -> Prepared:
                     raise BudgetError(
                         f"素材 {asset.id} 在当前 --scale={mode_name} 下仍不合约：\n"
                         + "\n".join("  " + c.line() for c in report.failures))
-            planned.append((asset, spec, upload_size, upload_size != (spec.width, spec.height)))
         else:
             spec = probe_image(asset.path, conf)
             report = check_image(spec, image_validator)
@@ -334,33 +227,61 @@ def _prepare_gen(conf, pkg: InputPackage, *, log) -> Prepared:
                     raise BudgetError(
                         f"素材 {asset.id} 无法通过缩放满足图片限制：\n"
                         + "\n".join("  " + c.line() for c in report.failures))
-            planned.append((asset, spec, upload_size, upload_size != (spec.width, spec.height)))
+        planned[asset.id] = (asset, spec, upload_size,
+                             upload_size != (spec.width, spec.height))
 
     master_asset = refs_mod.master(pkg.refs)
-    master_plan = next(p for p in planned if p[0].id == master_asset.id)
+    master_plan = planned.get(master_asset.id)
+    if master_plan is None:
+        raise UsageError("素材清单里只有 mask，没有可用作母版的素材")
     if limits.mode == "firstLastFrame":
-        first_plan = next(p for p in planned if p[0].role == "first_frame")
-        last_plan = next(p for p in planned if p[0].role == "last_frame")
-        if (first_plan[1].width, first_plan[1].height) != (last_plan[1].width, last_plan[1].height):
+        first_plan = planned[next(a.id for a in pkg.refs if a.role == "first_frame")]
+        last_plan = planned[next(a.id for a in pkg.refs if a.role == "last_frame")]
+        if (first_plan[1].width, first_plan[1].height) != (last_plan[1].width,
+                                                           last_plan[1].height):
             raise UsageError(
                 "firstLastFrame 的首帧与尾帧宽高必须一致："
                 f"{first_plan[1].width}x{first_plan[1].height} vs "
                 f"{last_plan[1].width}x{last_plan[1].height}")
+
     canvas = pkg.canvas_size or (master_plan[1].width, master_plan[1].height)
     source = pkg.source_size or canvas
-    geometry = plain_geometry(canvas, master_plan[2])
+    if tuple(canvas) == tuple(source):
+        geometry = plain_geometry(canvas, master_plan[2])
+    else:
+        geometry = scaled_geometry(canvas, source, master_plan[2])
+
+    # mask 是内部控制图：强制缩放到母版的上传画布，不按图片预算 fit。
+    for asset in pkg.refs:
+        if asset.role != "mask":
+            continue
+        spec = probe_image(asset.path, conf)
+        upload_size = tuple(geometry.canvas_size)
+        # 体积在缩放重编码后才成立，这里只看宽高、像素与比例。
+        report = check_image(InputSpec(width=upload_size[0], height=upload_size[1],
+                                       fps=0.0, duration_s=0.0,
+                                       size_bytes=0, container=spec.container),
+                             image_validator)
+        if not report.ok:
+            raise BudgetError(
+                f"mask {asset.id} 缩放到母版上传画布 {upload_size[0]}x{upload_size[1]} "
+                f"后仍不合约：\n"
+                + "\n".join("  " + c.line() for c in report.failures))
+        planned[asset.id] = (asset, spec, upload_size, upload_size != (spec.width, spec.height))
+
     variables: dict[str, object] = dict(geometry_variables(geometry))
     variables.update(pkg.variables)
     variables.update(refs_mod.mode_variables(limits.mode))
     variables["asset_list"] = refs_mod.asset_list(pkg.refs)
     prompt = render(template_path.read_text(encoding="utf-8"), variables)
 
+    ordered = [planned[a.id] for a in pkg.refs]
     duration_source = refs_mod.duration_source(limits.mode)
     duration_s, duration_source = _gen_duration(
-        conf, limits, source=duration_source, master_spec=master_plan[1], planned=planned)
+        conf, limits, source=duration_source, master_spec=master_plan[1], planned=ordered)
 
     refs_params = []
-    for asset, spec, upload_size, _needs_scale in planned:
+    for asset, _spec, upload_size, _needs_scale in ordered:
         refs_params.append({
             "id": asset.id,
             "kind": asset.kind,
@@ -368,10 +289,8 @@ def _prepare_gen(conf, pkg: InputPackage, *, log) -> Prepared:
             "path": str(asset.path),
             "sha256": asset.sha256 or sha256_16(asset.path),
             "upload": str(asset.path),
-            "width": spec.width,
-            "height": spec.height,
-            "upload_width": upload_size[0],
-            "upload_height": upload_size[1],
+            "width": upload_size[0],
+            "height": upload_size[1],
         })
     params = {
         "backend": "mglc",
@@ -385,8 +304,6 @@ def _prepare_gen(conf, pkg: InputPackage, *, log) -> Prepared:
         "scale": f"{master_plan[2][0]}x{master_plan[2][1]}",
         "keep_sound": (bool(conf.get("mglc.keep_original_sound", True))
                        and any(a.kind == "video" for a in pkg.refs)),
-        "input": str(master_asset.path) if master_asset.kind == "video" else None,
-        "mask": None,
         "canvas": f"{canvas[0]}x{canvas[1]}",
         "source": f"{source[0]}x{source[1]}",
         "template": pkg.template,
@@ -396,32 +313,33 @@ def _prepare_gen(conf, pkg: InputPackage, *, log) -> Prepared:
     }
 
     store = RunStore(pkg.workdir)
-    extra = {"refs": [[p[0].id, sha256_16(p[0].path)] for p in planned]}
+    extra = {"refs": [[p[0].id, sha256_16(p[0].path)] for p in ordered]}
     key = run_key(prompt, master_asset.path, None, params, extra)
     existing = store.find_by_key(key)
     if existing is not None:
         log.warn(f"this round already exists: {existing.dir.name} "
                  f"(stage {existing.stage}) -- reusing it")
-        prepared = tuple(
-            PreparedRef(asset, Path(asset.path), spec.width, spec.height, spec)
-            for asset, spec, _size, _needs in planned)
-        return Prepared(model, limits, geometry, master_plan[1], existing,
-                        reused=True, refs=prepared)
+        return Prepared(model, limits, geometry, master_plan[1], existing, reused=True)
 
     run = store.create(key, label=pkg.template, params=params, prompt=prompt)
     log.step(f"round {run.dir.name}")
 
-    prepared_refs: list[PreparedRef] = []
-    for (asset, spec, upload_size, needs_scale), info in zip(planned, refs_params,
+    prepared_upload: dict[str, tuple[Path, int, int]] = {}
+    for (asset, spec, upload_size, needs_scale), info in zip(ordered, refs_params,
                                                              strict=True):
         if needs_scale:
-            if asset.kind == "video":
+            if asset.role == "mask":
+                upload = scale_image(asset.path,
+                                     run.dir / f"upload_{asset.id}_{upload_size[0]}x{upload_size[1]}.png",
+                                     upload_size, config=conf)
+                measured = probe_image(upload, conf)
+                recheck = check_image(measured, image_validator)
+            elif asset.kind == "video":
                 upload = scale_video(
                     asset.path, run.dir / f"upload_{asset.id}_{upload_size[0]}x{upload_size[1]}.mp4",
                     upload_size, config=conf, crf=int(conf.get("mglc.upload_crf", 16)), log=log)
                 measured = probe_input(upload, conf)
                 recheck = check_input(measured, video_validator)
-                width, height = measured.width, measured.height
             else:
                 upload = scale_reference_image(
                     asset.path,
@@ -429,25 +347,31 @@ def _prepare_gen(conf, pkg: InputPackage, *, log) -> Prepared:
                     upload_size, config=conf)
                 measured = probe_image(upload, conf)
                 recheck = check_image(measured, image_validator)
-                width, height = measured.width, measured.height
             if not recheck.ok:
                 raise BudgetError(
                     f"素材 {asset.id} 缩放后仍不合约：\n"
                     + "\n".join("  " + c.line() for c in recheck.failures))
             info["upload"] = str(upload)
-            info["upload_width"], info["upload_height"] = width, height
+            info["width"], info["height"] = measured.width, measured.height
+            prepared_upload[asset.id] = (Path(upload), measured.width, measured.height)
         else:
-            upload = asset.path
-            width, height = spec.width, spec.height
-        prepared_refs.append(PreparedRef(asset, Path(upload), width, height, spec))
+            prepared_upload[asset.id] = (Path(asset.path), spec.width, spec.height)
 
-    master_prepared = next(p for p in prepared_refs if p.asset.id == master_asset.id)
-    run.upload = {"path": str(master_prepared.upload),
-                  "width": master_prepared.width, "height": master_prepared.height}
+    # 清单现场：断点续跑与人工复查都以它为准（契约 case-model.md §4）。
+    (run.dir / "refs.json").write_text(
+        json.dumps({"assets": refs_params}, ensure_ascii=False, indent=1),
+        encoding="utf-8")
+
+    master_upload = prepared_upload[master_asset.id]
+    run.upload = {"path": str(master_upload[0]),
+                  "width": master_upload[1], "height": master_upload[2]}
+    masks = [a for a in pkg.refs if a.role == "mask"]
+    if masks:
+        run.mask = {"path": str(prepared_upload[masks[0].id][0])}
     run.params["refs"] = refs_params
     run.save()
     log.info(f"prompt -> {run.prompt_path}")
-    return Prepared(model, limits, geometry, master_plan[1], run, refs=tuple(prepared_refs))
+    return Prepared(model, limits, geometry, master_plan[1], run)
 
 
 # ---- remote half -----------------------------------------------------------
@@ -471,18 +395,11 @@ def execute_round(conf, pkg: InputPackage, prepared: Prepared, *, client: Mglc, 
         if str(run.params.get("mode")) == "firstLastFrame":
             # CLI 的 --first-image/--last-image 没有 asset-id 参数，首尾图按路径直传。
             log.info("firstLastFrame：首尾图直传，跳过 SD 合规素材登记")
-        elif ledger_refs:
+        else:
             items = [(f"{item['kind']}:{item['id']}", item["kind"], item["upload"])
                      for item in ledger_refs]
             outcome.assets = ensure_assets(
                 client, run, refs=items,
-                timeout=float(conf.get("mglc.review_timeout_s", 1800.0)),
-                interval=max(5.0, float(conf.get("mglc.poll_interval_s", 20.0)) / 2),
-                log=log)
-        else:
-            outcome.assets = ensure_assets(
-                client, run, video=run.upload.get("path"),
-                mask=(run.mask or {}).get("path"),
                 timeout=float(conf.get("mglc.review_timeout_s", 1800.0)),
                 interval=max(5.0, float(conf.get("mglc.poll_interval_s", 20.0)) / 2),
                 log=log)

@@ -62,19 +62,32 @@ def test_bad_job_name_is_usage_error(tmp_path):
     assert r.exit_code == 2
 
 
-def test_submit_rejects_bad_geometry(tmp_path, util_video):
-    r = runner.invoke(app, ["submit", "--job", "j", "--input", str(util_video),
-                            "--canvas", "46x68", "--source", "4000x2000",
-                            "--workdir", str(tmp_path)])
-    assert r.exit_code == 1          # band 装不进 canvas → 运行失败
-    r = runner.invoke(app, ["submit", "--job", "j", "--input", str(util_video),
+def _refs_file(tmp_path, video):
+    path = tmp_path / "refs.json"
+    path.write_text(json.dumps({"assets": [
+        {"id": "clip", "kind": "video", "role": "edit_master", "path": str(video)},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def test_submit_rejects_bad_arguments(tmp_path, util_video):
+    refs = _refs_file(tmp_path, util_video)
+    r = runner.invoke(app, ["submit", "--job", "j", "--refs", str(refs),
                             "--canvas", "garbage", "--source", "4000x2000",
                             "--workdir", str(tmp_path)])
     assert r.exit_code == 2          # 参数格式错
+    r = runner.invoke(app, ["submit", "--job", "j",
+                            "--canvas", "4668x2000", "--source", "4000x2000",
+                            "--workdir", str(tmp_path)])
+    assert r.exit_code == 2          # 缺 --refs（唯一提交入口）
+    r = runner.invoke(app, ["submit", "--job", "j", "--refs", str(refs),
+                            "--canvas", "4668x2000", "--workdir", str(tmp_path)])
+    assert r.exit_code == 2          # canvas/source 必须成对
 
 
 def test_submit_unknown_variable_is_usage_error(tmp_path, util_video):
-    r = runner.invoke(app, ["submit", "--job", "j", "--input", str(util_video),
+    r = runner.invoke(app, ["submit", "--job", "j", "--refs",
+                            str(_refs_file(tmp_path, util_video)),
                             "--canvas", "4668x2000", "--source", "4000x2000",
                             "--set", "nope=1", "--workdir", str(tmp_path)])
     assert r.exit_code == 2
@@ -214,17 +227,24 @@ class _Model:
 
 
 def _params_offline(tmp_path, monkeypatch):
-    input = tmp_path / "in.mp4"
-    input.write_bytes(b"fake")
+    video = tmp_path / "in.mp4"
+    video.write_bytes(b"fake")
+    refs = tmp_path / "refs.json"
+    refs.write_text(json.dumps({"assets": [
+        {"id": "clip", "kind": "video", "role": "edit_master", "path": str(video)},
+    ]}, ensure_ascii=False), encoding="utf-8")
     monkeypatch.setattr(vrgen_cli, "load_models", lambda *a, **kw: [_Model()])
     monkeypatch.setattr(vrgen_cli, "find_model", lambda models, code: _Model())
     monkeypatch.setattr(vrgen_cli, "probe_input", lambda path, conf: InputSpec(
         width=4668, height=2000, fps=30.0, duration_s=7.979,
         size_bytes=228_200_000, container=("mp4",)))
-    return input
+    monkeypatch.setattr(vrgen_cli, "probe_image", lambda path, conf: InputSpec(
+        width=1920, height=1080, fps=0.0, duration_s=0.0,
+        size_bytes=500_000, container=("png",)))
+    return refs
 
 
-def test_params_show_without_input_returns_modes_only(tmp_path, monkeypatch):
+def test_params_show_without_refs_returns_modes_only(tmp_path, monkeypatch):
     _params_offline(tmp_path, monkeypatch)
     r = runner.invoke(app, ["params", "show", "--job", "j1",
                             "--workdir", str(tmp_path)])
@@ -232,7 +252,8 @@ def test_params_show_without_input_returns_modes_only(tmp_path, monkeypatch):
     data = json.loads(r.output)
     assert data["output"] == [] and data["input"] == []
     assert data["modes"][0]["value"] == "videoEdit"
-    assert "roles" in data["modes"][0]
+    # 角色选项来自全局词表，不再按模式回显矩阵。
+    assert "roles" not in data["modes"][0]
 
 
 class _FirstLastLimits:
@@ -278,7 +299,7 @@ def test_params_show_first_last_frame_without_input(tmp_path, monkeypatch):
 
 
 def test_params_show_first_last_frame_rejects_input_video(tmp_path, monkeypatch):
-    input = _params_offline(tmp_path, monkeypatch)
+    refs = _params_offline(tmp_path, monkeypatch)
     monkeypatch.setattr(vrgen_cli, "load_models",
                         lambda *a, **kw: [_FirstLastModel()])
     monkeypatch.setattr(vrgen_cli, "find_model",
@@ -287,7 +308,7 @@ def test_params_show_first_last_frame_rejects_input_video(tmp_path, monkeypatch)
         tmp_path, "j1", jobs.GenerationParams(mode="firstLastFrame"))
 
     r = runner.invoke(app, ["params", "show", "--job", "j1",
-                            "--input", str(input), "--canvas", "1920x1080",
+                            "--refs", str(refs), "--canvas", "1920x1080",
                             "--source", "1920x1080", "--workdir", str(tmp_path)])
     assert r.exit_code == 2, r.output
     assert "不接受输入视频" in r.output
@@ -313,9 +334,9 @@ def test_prompt_show_marks_gen_multi_computed_keys(tmp_path):
 
 
 def test_params_show_reports_both_resolution_kinds(tmp_path, monkeypatch):
-    input = _params_offline(tmp_path, monkeypatch)
+    refs = _params_offline(tmp_path, monkeypatch)
     r = runner.invoke(app, ["params", "show", "--job", "j1",
-                            "--input", str(input), "--canvas", "4668x2000",
+                            "--refs", str(refs), "--canvas", "4668x2000",
                             "--source", "4000x2000", "--workdir", str(tmp_path)])
     assert r.exit_code == 0, r.output
     data = json.loads(r.output)
@@ -335,7 +356,7 @@ def test_params_show_reports_both_resolution_kinds(tmp_path, monkeypatch):
 
 
 def test_params_save_roundtrips_through_show(tmp_path, monkeypatch):
-    input = _params_offline(tmp_path, monkeypatch)
+    refs = _params_offline(tmp_path, monkeypatch)
     wd = str(tmp_path)
     r = runner.invoke(app, ["params", "save", "--job", "j1",
                             "--resolution", "720p", "--scale", "half",
@@ -347,7 +368,7 @@ def test_params_save_roundtrips_through_show(tmp_path, monkeypatch):
     assert jobs.generation_params_path(tmp_path, "j1").is_file()
 
     r = runner.invoke(app, ["params", "show", "--job", "j1",
-                            "--input", str(input), "--canvas", "4668x2000",
+                            "--refs", str(refs), "--canvas", "4668x2000",
                             "--source", "4000x2000", "--workdir", wd])
     data = json.loads(r.output)
     assert data["current"]["resolution"] == "720p"
@@ -357,7 +378,7 @@ def test_params_save_roundtrips_through_show(tmp_path, monkeypatch):
 
 
 def test_params_save_persists_project_and_episode_for_the_ui(tmp_path, monkeypatch):
-    input = _params_offline(tmp_path, monkeypatch)
+    refs = _params_offline(tmp_path, monkeypatch)
     wd = str(tmp_path)
     r = runner.invoke(app, ["params", "save", "--job", "j1",
                             "--resolution", "1080p", "--scale", "auto",
@@ -369,7 +390,7 @@ def test_params_save_persists_project_and_episode_for_the_ui(tmp_path, monkeypat
     assert echo["project_id"] == 2060150527854528 and echo["episode"] == 1
 
     r = runner.invoke(app, ["params", "show", "--job", "j1",
-                            "--input", str(input), "--canvas", "1920x1052",
+                            "--refs", str(refs), "--canvas", "1920x1052",
                             "--source", "1920x1052", "--workdir", wd])
     current = json.loads(r.output)["current"]
     assert current["session_id"] == 2060150528006080
@@ -385,7 +406,7 @@ def test_params_save_persists_project_and_episode_for_the_ui(tmp_path, monkeypat
 
 
 def test_params_save_persists_project_session_id(tmp_path, monkeypatch):
-    input = _params_offline(tmp_path, monkeypatch)
+    refs = _params_offline(tmp_path, monkeypatch)
     wd = str(tmp_path)
     r = runner.invoke(app, ["params", "save", "--job", "j1",
                             "--resolution", "1080p", "--scale", "auto",
@@ -394,7 +415,7 @@ def test_params_save_persists_project_session_id(tmp_path, monkeypatch):
     assert json.loads(r.output)["session_id"] == 2060150528006080
 
     r = runner.invoke(app, ["params", "show", "--job", "j1",
-                            "--input", str(input), "--canvas", "1920x1052",
+                            "--refs", str(refs), "--canvas", "1920x1052",
                             "--source", "1920x1052", "--workdir", wd])
     data = json.loads(r.output)
     assert data["current"]["session_id"] == 2060150528006080
@@ -406,9 +427,9 @@ def test_params_save_persists_project_session_id(tmp_path, monkeypatch):
 
 
 def test_params_show_aspect_auto_is_reported_for_gen(tmp_path, monkeypatch):
-    input = _params_offline(tmp_path, monkeypatch)
+    refs = _params_offline(tmp_path, monkeypatch)
     r = runner.invoke(app, ["params", "show", "--job", "j1",
-                            "--input", str(input), "--canvas", "1920x1052",
+                            "--refs", str(refs), "--canvas", "1920x1052",
                             "--source", "1920x1052", "--aspect-ratio", "auto",
                             "--workdir", str(tmp_path)])
     assert r.exit_code == 0, r.output
@@ -430,8 +451,9 @@ def test_character_repaint_template_is_available():
     from vrgen.paths import templates_dir
     text = (templates_dir() / "character-repaint.md").read_text(encoding="utf-8")
     for key in ("subject", "target", "plot", "motion_rule", "preserve",
-                "allowed_changes", "canvas_w", "canvas_h"):
+                "allowed_changes", "canvas_w", "canvas_h", "asset_list"):
         assert "{" + key + "}" in text
+    assert "最后一张图片是编辑区域标注" in text
 
 
 def test_effective_aspect_maps_modes_with_a_ratio_list():
@@ -442,7 +464,7 @@ def test_effective_aspect_maps_modes_with_a_ratio_list():
 
 
 def test_params_save_persists_mode_and_aspect(tmp_path, monkeypatch):
-    input = _params_offline(tmp_path, monkeypatch)
+    refs = _params_offline(tmp_path, monkeypatch)
     wd = str(tmp_path)
     r = runner.invoke(app, ["params", "save", "--job", "j1",
                             "--resolution", "1080p", "--scale", "auto",
@@ -472,6 +494,7 @@ def test_360_template_renders_plot_and_allowed_changes():
     geom = scaled_geometry((4668, 2000), (4000, 2000), (4400, 1884))
     text = render(template, {
         **geometry_variables(geom),
+        "asset_list": "@Video1：编辑母版，负责时间轴、构图与动作基准。",
         "theme": "黄昏下的木质帆船", "style": "电影级写实",
         "plot": "帆船沿原航向前进", "action": "船帆随风轻微摆动",
         "allowed_changes": "无。",

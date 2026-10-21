@@ -75,16 +75,35 @@ def test_load_refs_checks_sha256(tmp_path):
         load_refs(path)
 
 
-def test_role_matrix(tmp_path):
+def test_semantic_rules_replace_the_role_matrix(tmp_path):
     path, _v1, _v2, _i1 = _refs(tmp_path)
     refs = load_refs(path)
-    validate_mode(refs, "allMediaRef")
-    with pytest.raises(UsageError, match="恰好需要 1 个视频"):
-        validate_mode(refs, "videoEdit")
-    with pytest.raises(UsageError, match="subject_ref"):
-        validate_mode(tuple(a for a in refs if a.id != "v2")
-                      + (RefAsset("v1b", "video", "subject_ref", refs[0].path),),
-                      "allMediaRef")
+    # 角色矩阵已退役：videoEdit 不再限制第二个视频的角色。
+    validate_mode(refs, "videoEdit")
+    with pytest.raises(UsageError, match="第一条视频"):
+        validate_mode((refs[1], refs[0], refs[2]), "allMediaRef")
+    extra_master = (refs[0], RefAsset("v3", "video", "edit_master", refs[1].path))
+    with pytest.raises(UsageError, match="至多"):
+        validate_mode(extra_master, "videoEdit")
+
+
+def test_raw_roles_and_mask_rules(tmp_path):
+    image = _file(tmp_path / "i.png")
+    video = _file(tmp_path / "v.mp4")
+    with pytest.raises(UsageError, match="工作台"):
+        validate_mode((RefAsset("i1", "image", "first_frame_raw", image),), "allMediaRef")
+    with pytest.raises(UsageError, match="mask"):
+        validate_mode((RefAsset("mask", "video", "mask", video),), "videoEdit")
+
+
+def test_mask_is_not_numbered(tmp_path):
+    path, _v1, _v2, _i1 = _refs(tmp_path)
+    refs = load_refs(path)
+    mask = RefAsset("mask", "image", "mask", refs[2].path)
+    text = asset_list(refs + (mask,))
+    assert "@Image1：主体参考" in text
+    assert "@Image2" not in text
+    assert "编辑区域标注" not in text
 
 
 def test_allmediaref_master_must_be_first(tmp_path):
@@ -115,7 +134,7 @@ def test_counts_and_prompt_block(tmp_path):
     assert "迈步" in all_media["timeline_rule"]
 
 
-def test_space_ref_is_allowed_for_all_media_ref(tmp_path):
+def test_any_role_is_allowed_without_the_matrix(tmp_path):
     v = _file(tmp_path / "v.mp4")
     i = _file(tmp_path / "i.png")
     path = _write_refs(tmp_path, [
@@ -124,10 +143,9 @@ def test_space_ref_is_allowed_for_all_media_ref(tmp_path):
     ])
     refs = load_refs(path)
     validate_mode(refs, "allMediaRef")
+    validate_mode(refs, "videoEdit")      # 语义规则里没有按模式的角色白名单
     assert "@Video1：空间参考" in asset_list(refs)
     assert "@Image1：空间参考" in asset_list(refs)
-    with pytest.raises(UsageError, match="不允许 video 使用角色 space_ref"):
-        validate_mode(refs, "videoEdit")
 
 
 def test_allmediaref_accepts_image_only(tmp_path):
@@ -154,7 +172,7 @@ def test_first_last_frame_role_matrix(tmp_path):
     with pytest.raises(UsageError, match="firstLastFrame.*顺序"):
         validate_mode((refs[1], refs[0]), "firstLastFrame")
     video = _file(tmp_path / "v.mp4")
-    with pytest.raises(UsageError, match="不允许视频"):
+    with pytest.raises(UsageError, match="不能出现视频"):
         validate_mode(refs + (RefAsset("v1", "video", "edit_master", video),),
                       "firstLastFrame")
     mid = _file(tmp_path / "i3.png")
