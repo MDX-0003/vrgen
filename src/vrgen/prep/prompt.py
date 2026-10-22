@@ -30,12 +30,14 @@ GEOMETRY_KEYS = (
     "source_w", "source_h", "scale_pct",
 )
 
-_PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_PLACEHOLDER = re.compile(
+    r"\{([A-Za-z_][A-Za-z0-9_]*)(?:\|([^{}\r\n]*))?\}")
 
 
 def template_placeholders(template_text: str) -> list[str]:
     """模板正文引用的全部 ``{键}``，按首次出现顺序去重。
 
+    占位符可带页面显示名（``{subject|原主体}``）；键名只看 ``|`` 前的部分。
     只认标识符形态的占位符；字面量花括号（``{{…}}``）按尽力而为处理——正文真有
     花括号时 render 在 format 阶段就会报 malformed，不会静默出错。
     """
@@ -43,6 +45,29 @@ def template_placeholders(template_text: str) -> list[str]:
     for m in _PLACEHOLDER.finditer(template_text):
         seen.setdefault(m.group(1), None)
     return list(seen)
+
+
+def template_aliases(template_text: str) -> dict[str, str]:
+    """``{键|显示名}`` 里的显示名，键 -> 显示名；同名键以第一次为准。
+
+    显示名只服务页面，不进入展开后的提示词。没有写显示名的键不出现在结果里，
+    调用方退回键名显示。
+    """
+    out: dict[str, str] = {}
+    for m in _PLACEHOLDER.finditer(template_text):
+        label = (m.group(2) or "").strip()
+        if label:
+            out.setdefault(m.group(1), label)
+    return out
+
+
+def strip_aliases(template_text: str) -> str:
+    """把 ``{键|显示名}`` 归一成 ``{键}``，供 ``format_map`` 展开。
+
+    只替换合法占位符；其他花括号原样保留，仍由 format 阶段报 malformed。
+    """
+    return _PLACEHOLDER.sub(lambda m: "{" + m.group(1) + "}", template_text)
+
 
 
 def geometry_variables(geom: UploadGeometry) -> dict[str, object]:
@@ -129,7 +154,7 @@ def load_brief(path: str | Path) -> dict[str, str]:
 def render(template_text: str, variables: Mapping[str, object]) -> str:
     """Fill a template. Unknown placeholders are an error, not empty text."""
     try:
-        return template_text.format_map(_Variables(variables))
+        return strip_aliases(template_text).format_map(_Variables(variables))
     except AigcError:
         raise
     except (IndexError, ValueError) as exc:      # stray { } in the template

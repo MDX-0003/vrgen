@@ -111,6 +111,8 @@ def test_prompt_show_defaults_and_placeholders(tmp_path):
     assert "【允许变化】" in data["template_text"]
     assert "{canvas_w}" in data["template_text"]
     assert "canvas_w" in data["geometry_keys"] and "canvas_w" not in data["vars"]
+    assert data["labels"]["theme"] == "主题 / 场景"     # 模板别名（契约 §4）
+    assert data["labels"]["plot"] == "情节"
     assert "360-closure" in data["available"]
 
 
@@ -440,19 +442,23 @@ def test_params_show_aspect_auto_is_reported_for_gen(tmp_path, monkeypatch):
 
 def test_gen_edit_template_is_available_and_needs_its_variables():
     from vrgen.paths import templates_dir
+    from vrgen.prep.prompt import template_placeholders
     text = (templates_dir() / "gen-edit.md").read_text(encoding="utf-8")
+    keys = set(template_placeholders(text))
     for key in ("subject", "target", "plot", "motion_rule", "preserve",
                 "allowed_changes"):
-        assert "{" + key + "}" in text
-    assert "{theme}" not in text
+        assert key in keys
+    assert "theme" not in keys
 
 
 def test_character_repaint_template_is_available():
     from vrgen.paths import templates_dir
+    from vrgen.prep.prompt import template_placeholders
     text = (templates_dir() / "character-repaint.md").read_text(encoding="utf-8")
+    keys = set(template_placeholders(text))
     for key in ("subject", "target", "plot", "motion_rule", "preserve",
                 "allowed_changes", "canvas_w", "canvas_h", "asset_list"):
-        assert "{" + key + "}" in text
+        assert key in keys
     assert "最后一张图片是编辑区域标注" in text
 
 
