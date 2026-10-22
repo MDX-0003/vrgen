@@ -31,15 +31,16 @@ GEOMETRY_KEYS = (
 )
 
 _PLACEHOLDER = re.compile(
-    r"\{([A-Za-z_][A-Za-z0-9_]*)(?:\|([^{}\r\n]*))?\}")
+    r"\{([A-Za-z_][A-Za-z0-9_]*)(?:\|([^{}\r\n|]*))?(?:\|([^{}\r\n]*))?\}")
 
 
 def template_placeholders(template_text: str) -> list[str]:
     """模板正文引用的全部 ``{键}``，按首次出现顺序去重。
 
-    占位符可带页面显示名（``{subject|原主体}``）；键名只看 ``|`` 前的部分。
-    只认标识符形态的占位符；字面量花括号（``{{…}}``）按尽力而为处理——正文真有
-    花括号时 render 在 format 阶段就会报 malformed，不会静默出错。
+    占位符可带页面显示名与填写说明（``{subject|原主体|写画面里…}``）；
+    键名只看第一个 ``|`` 前的部分。只认标识符形态的占位符；字面量花括号
+    （``{{…}}``）按尽力而为处理——正文真有花括号时 render 在 format 阶段就会
+    报 malformed，不会静默出错。
     """
     seen: dict[str, None] = {}
     for m in _PLACEHOLDER.finditer(template_text):
@@ -61,8 +62,21 @@ def template_aliases(template_text: str) -> dict[str, str]:
     return out
 
 
+def template_help(template_text: str) -> dict[str, str]:
+    """``{键|显示名|填写说明}`` 里的说明，键 -> 说明；同名键以第一次为准。
+
+    说明只服务页面，回答“为什么要填这个字段”；不进入展开后的提示词。
+    """
+    out: dict[str, str] = {}
+    for m in _PLACEHOLDER.finditer(template_text):
+        help_text = (m.group(3) or "").strip()
+        if help_text:
+            out.setdefault(m.group(1), help_text)
+    return out
+
+
 def strip_aliases(template_text: str) -> str:
-    """把 ``{键|显示名}`` 归一成 ``{键}``，供 ``format_map`` 展开。
+    """把 ``{键|显示名|说明}`` 归一成 ``{键}``，供 ``format_map`` 展开。
 
     只替换合法占位符；其他花括号原样保留，仍由 format 阶段报 malformed。
     """

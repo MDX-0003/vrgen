@@ -113,6 +113,7 @@ def test_prompt_show_defaults_and_placeholders(tmp_path):
     assert "canvas_w" in data["geometry_keys"] and "canvas_w" not in data["vars"]
     assert data["labels"]["theme"] == "主题 / 场景"     # 模板别名（契约 §4）
     assert data["labels"]["plot"] == "情节"
+    assert data["help"]["theme"].startswith("写场景主题")
     assert "360-closure" in data["available"]
 
 

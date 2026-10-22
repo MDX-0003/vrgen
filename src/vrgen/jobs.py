@@ -16,7 +16,12 @@ from pathlib import Path
 
 from .errors import UsageError, VrgenError
 from .paths import templates_dir
-from .prep.prompt import GEOMETRY_KEYS, template_aliases, template_placeholders
+from .prep.prompt import (
+    GEOMETRY_KEYS,
+    template_aliases,
+    template_help,
+    template_placeholders,
+)
 from .round.ledger import Run, RunStore
 
 PROMPT_VARS = "prompt-vars.toml"
@@ -212,6 +217,7 @@ def prompt_overview(workdir, job, template: str | None = None,
         "geometry_keys": [],
         "computed_keys": [],
         "labels": {},
+        "help": {},
         "vars": pv.vars,
     }
     if resolved:
@@ -221,7 +227,8 @@ def prompt_overview(workdir, job, template: str | None = None,
                         placeholders=placeholders,
                         geometry_keys=[k for k in placeholders if k in GEOMETRY_KEYS],
                         computed_keys=[k for k in placeholders if k in COMPUTED_KEYS],
-                        labels=template_aliases(text))
+                        labels=template_aliases(text),
+                        help=template_help(text))
     return overview
 
 
