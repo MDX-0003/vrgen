@@ -211,7 +211,15 @@ def submit(client: Mglc, run: Run, *, confirm: bool = False, timeout: float = 30
 
 
 def state(client: Mglc, task_id: int) -> tuple[int, str]:
-    return parse_state(client.task_status(task_id).data)
+    code, label, _data = status(client, task_id)
+    return code, label
+
+
+def status(client: Mglc, task_id: int) -> tuple[int, str, Any]:
+    """(code, label, raw data) —— 失败原因在 raw data 里，状态解析只取前两项。"""
+    data = client.task_status(task_id).data
+    code, label = parse_state(data)
+    return code, label, data
 
 
 def parse_state(data: Any) -> tuple[int, str]:
@@ -225,17 +233,44 @@ def parse_state(data: Any) -> tuple[int, str]:
     raise AigcError(f"no task status in the response (shape unverified); raw:\n  {data!r}")
 
 
+#: 平台失败原因的字段名；按优先级取第一个有值的。
+_REASON_KEYS = (
+    "failreason", "fail_reason", "failure_reason", "errormsg", "error_msg",
+    "errormessage", "error_message", "reason",
+)
+
+
+def failure_reason(data: Any) -> str:
+    """从 task status 的原始返回里取平台给的失败原因。
+
+    平台把原因放在 ``failReason``（实测 2026-10-22：视频编辑被判定为参考生成），
+    但字段名在不同任务上不保证一致，所以按一组候选键宽容读取。
+    """
+    found: dict[str, str] = {}
+    for key, value in walk_scalars(data):
+        low = key.lower()
+        if low not in _REASON_KEYS or not isinstance(value, str):
+            continue
+        text = value.strip()
+        if text and text.upper() != "OK":
+            found.setdefault(low, text)
+    for key in _REASON_KEYS:
+        if key in found:
+            return found[key]
+    return ""
+
+
 def wait(client: Mglc, task_id: int, *, interval: float = 20.0, timeout: float = 3600.0,
          log=None) -> tuple[int, str]:
     """Poll to a terminal state. A failed or cancelled task raises ``TaskFailed``."""
     deadline = time.monotonic() + timeout
     started = time.monotonic()
     while True:
-        code, label = state(client, task_id)
+        code, label, data = status(client, task_id)
         if code == TERMINAL_GOOD:
             return code, label
         if code in TERMINAL_BAD:
-            raise TaskFailed(task_id, label)
+            raise TaskFailed(task_id, label, reason=failure_reason(data))
         if time.monotonic() >= deadline:
             raise AigcError(
                 f"task {task_id} still {label} after {timeout:g}s; it is not cancellable, "

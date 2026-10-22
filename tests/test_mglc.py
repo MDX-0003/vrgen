@@ -19,7 +19,7 @@ import vrgen.round.pipeline as pipe
 from vrgen import config as config_mod
 from vrgen import manual
 from vrgen.config import ConfigError
-from vrgen.errors import AigcError, BudgetError, LedgerError, UsageError
+from vrgen.errors import AigcError, BudgetError, LedgerError, TaskFailed, UsageError
 from vrgen.platform.client import Envelope, Mglc
 from vrgen.platform.models import find_model, load_models, parse_models
 from vrgen.prep.budget import InputSpec, check_input, suggest_size
@@ -341,6 +341,40 @@ def test_build_generate_argv_passes_project_session_id():
         resolution="1080p", aspect_ratio="auto", num=1,
         videos=[("up.mp4", 11)], session_id=0)
     assert "--session-id" not in argv
+
+
+def test_task_failure_carries_the_platform_reason():
+    """平台把具体原因放在 failReason；它必须出现在 TaskFailed 的消息里。"""
+
+    def runner(argv, timeout):
+        return _Proc2(json.dumps({"code": 0, "data": {
+            "failReason": "所选任务类型与提示词/输入不匹配（视频编辑被判定为参考生成）",
+            "status": 3, "taskId": 1}}))
+
+    client = Mglc(binary="mglc-fake", runner=runner)
+    with pytest.raises(TaskFailed) as excinfo:
+        task_mod.wait(client, 1, interval=0.0, timeout=5)
+    assert "视频编辑被判定为参考生成" in str(excinfo.value)
+    assert excinfo.value.reason.startswith("所选任务类型")
+
+
+def test_failure_reason_tolerates_other_field_names():
+    assert task_mod.failure_reason({"msg": "OK", "data": {"errorMsg": "超时"}}) == "超时"
+    assert task_mod.failure_reason({"data": {"status": 3, "msg": "OK"}}) == ""
+
+
+def test_execute_round_notes_the_platform_reason(tmp_path, monkeypatch):
+    conf, pkg, prepared, client = _fake_round(monkeypatch, tmp_path)
+
+    def boom(*args, **kwargs):
+        raise TaskFailed(7, "failed", reason="所选任务类型与提示词/输入不匹配")
+
+    monkeypatch.setattr(pipe, "wait_task", boom)
+    with pytest.raises(TaskFailed):
+        pipe.execute_round(conf, pkg, prepared, client=client, log=Log(quiet=True))
+    blob = json.loads((prepared.run.dir / "run.json").read_text(encoding="utf-8"))
+    assert any("所选任务类型与提示词/输入不匹配" in note for note in blob["notes"])
+    assert blob["stage"] == "failed"
 
 
 def test_task_id_and_state_extraction_tolerate_nesting():

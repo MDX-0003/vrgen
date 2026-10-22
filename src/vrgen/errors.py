@@ -67,10 +67,17 @@ class AssetError(AigcError):
 
 
 class TaskFailed(AigcError):
-    """The generation task reached a terminal non-success state."""
+    """The generation task reached a terminal non-success state.
 
-    def __init__(self, task_id: Any, state: str, raw: str = ""):
+    ``reason`` 是平台返回的具体失败原因（task status 的 ``failReason``）；
+    有它就不再只显示一个 'failed'，台账和 web 任务日志都能直接看到原因。
+    """
+
+    def __init__(self, task_id: Any, state: str, raw: str = "", reason: str = ""):
         self.task_id = task_id
         self.state = state
         self.raw = raw
-        super().__init__(f"task {task_id} ended as {state!r}" + (f"\n{raw}" if raw else ""))
+        self.reason = str(reason or "")
+        detail = self.reason or raw
+        super().__init__(f"task {task_id} ended as {state!r}"
+                         + (f": {detail}" if detail else ""))
