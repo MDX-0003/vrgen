@@ -149,6 +149,28 @@ def extract_task_id(data: Any) -> int:
     return candidates[0][1]
 
 
+def extract_task_ids(data: Any) -> list[int]:
+    """All task ids in a submit response, in payload order.
+
+    An image batch with ``--num 4`` comes back as four sibling tasks, not one task
+    with four images. Taking only the first id silently drops three paid results,
+    so image rounds keep every id and poll them all.
+    """
+    found: list[int] = []
+    for key, value in _walk_url_values(data):
+        if key.lower() not in ("taskid", "taskids"):
+            continue
+        try:
+            task_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if task_id not in found:
+            found.append(task_id)
+    if not found:
+        return [extract_task_id(data)]
+    return found
+
+
 def submit(client: Mglc, run: Run, *, confirm: bool = False, timeout: float = 300.0,
            log=None) -> int:
     """Send the request. The only quota-spending call in the package.

@@ -18,6 +18,7 @@ from .errors import UsageError, VrgenError
 from .paths import templates_dir
 from .prep.prompt import (
     GEOMETRY_KEYS,
+    render,
     template_aliases,
     template_help,
     template_placeholders,
@@ -28,7 +29,7 @@ PROMPT_VARS = "prompt-vars.toml"
 
 #: 模板占位里由素材与模式在 submit 时计算的只读键（决策 25）。它们不属于
 #: ``--set`` 的草稿变量，也不允许写进 prompt-vars.toml。
-COMPUTED_KEYS = ("asset_list", "task_rule", "timeline_rule")
+COMPUTED_KEYS = ("asset_list", "task_rule", "timeline_rule", "image_roles")
 
 #: job 名只允许这组字符：它是台账树的目录名，不能让它逃出 workdir。
 _JOB_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -67,12 +68,22 @@ class PromptVars:
     vars: dict[str, str] = field(default_factory=dict)
 
 
-def prompt_vars_path(workdir: str | Path | None, job: str) -> Path:
-    return job_dir(workdir, job) / PROMPT_VARS
+def vars_filename(value: str | None) -> str:
+    """草稿文件名：job 目录下的裸文件名，必须以 .toml 结尾。"""
+    name = str(value or PROMPT_VARS)
+    if name != Path(name).name or not name.endswith(".toml"):
+        raise UsageError(f"--vars-file 只接受 job 目录下的 .toml 文件名：{value!r}")
+    return name
 
 
-def load_prompt_vars(workdir: str | Path | None, job: str) -> PromptVars:
-    path = prompt_vars_path(workdir, job)
+def prompt_vars_path(workdir: str | Path | None, job: str,
+                     vars_file: str = PROMPT_VARS) -> Path:
+    return job_dir(workdir, job) / vars_filename(vars_file)
+
+
+def load_prompt_vars(workdir: str | Path | None, job: str,
+                     vars_file: str = PROMPT_VARS) -> PromptVars:
+    path = prompt_vars_path(workdir, job, vars_file)
     if not path.is_file():
         return PromptVars()
     data = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -82,10 +93,11 @@ def load_prompt_vars(workdir: str | Path | None, job: str) -> PromptVars:
     return PromptVars(template=data.get("template"), vars=dict(variables))
 
 
-def save_prompt_vars(workdir: str | Path | None, job: str, pv: PromptVars) -> Path:
+def save_prompt_vars(workdir: str | Path | None, job: str, pv: PromptVars,
+                     vars_file: str = PROMPT_VARS) -> Path:
     """写回草稿。值用 JSON 字符串转义——JSON 的字符串规则是 TOML 基本串的子集，
     中文/引号/反斜杠都能安全往返。"""
-    path = prompt_vars_path(workdir, job)
+    path = prompt_vars_path(workdir, job, vars_file)
     path.parent.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []
     if pv.template is not None:
@@ -100,6 +112,19 @@ def save_prompt_vars(workdir: str | Path | None, job: str, pv: PromptVars) -> Pa
 
 def _toml_str(key: str, value: str) -> str:
     return f"{key} = {json.dumps(value, ensure_ascii=False)}"
+
+
+def render_template(workdir, job, template: str,
+                    vars_file: str = PROMPT_VARS,
+                    extra: dict[str, object] | None = None) -> str:
+    """用草稿变量 + 计算变量展开一个模板；模板不存在时列出可用模板。"""
+    path = templates_dir() / f"{template}.md"
+    if not path.is_file():
+        available = sorted(p.name for p in templates_dir().glob("*.md"))
+        raise UsageError(f"模板 {template!r} 不存在；可用：{available}")
+    variables: dict[str, object] = dict(load_prompt_vars(workdir, job, vars_file).vars)
+    variables.update(extra or {})
+    return render(path.read_text(encoding="utf-8"), variables)
 
 
 def apply_set(pv: PromptVars, overrides: dict[str, str]) -> PromptVars:
@@ -201,13 +226,14 @@ def _resolve_template(template: str | None, pv: PromptVars,
 
 
 def prompt_overview(workdir, job, template: str | None = None,
-                    config_default: str | None = None) -> dict:
+                    config_default: str | None = None,
+                    vars_file: str = PROMPT_VARS) -> dict:
     """``prompt show`` 的本体：生效模板、正文、占位符、几何键、草稿 vars。
 
     返回结构是 CLI 契约（docs/case-model.md §4），JSON 输出给调用方（web）解析；
     还没选过模板时 template_text 为 null、其余照常，页面据此显示空态。
     """
-    pv = load_prompt_vars(workdir, job)
+    pv = load_prompt_vars(workdir, job, vars_file)
     resolved = _resolve_template(template, pv, config_default)
     overview: dict = {
         "template": resolved,
@@ -234,13 +260,14 @@ def prompt_overview(workdir, job, template: str | None = None,
 
 def edit_prompt_vars(workdir, job, sets: dict[str, str] | None = None,
                      unsets: list[str] | None = None, template: str | None = None,
-                     config_default: str | None = None) -> dict:
+                     config_default: str | None = None,
+                     vars_file: str = PROMPT_VARS) -> dict:
     """``prompt save`` 的本体：改草稿并写回，返回保存后的 :func:`prompt_overview`。
 
     与 submit ``--set`` 的差别：这里是草稿编辑器，允许出现新键；模板正文引用的
     键不许删（删了 submit 时模板展开必失败，这里提前 fail loud）。
     """
-    pv = load_prompt_vars(workdir, job)
+    pv = load_prompt_vars(workdir, job, vars_file)
     resolved = _resolve_template(template, pv, config_default)
     computed = sorted(set(COMPUTED_KEYS) & set(sets or {}))
     if computed:
@@ -258,8 +285,10 @@ def edit_prompt_vars(workdir, job, sets: dict[str, str] | None = None,
             known = ", ".join(sorted(merged)) or "(空)"
             raise UsageError(f"未知变量 {key!r}；本 job 可用：{known}")
         del merged[key]
-    save_prompt_vars(workdir, job, PromptVars(template=resolved, vars=merged))
-    return prompt_overview(workdir, job, config_default=config_default)
+    save_prompt_vars(workdir, job, PromptVars(template=resolved, vars=merged),
+                     vars_file)
+    return prompt_overview(workdir, job, config_default=config_default,
+                           vars_file=vars_file)
 
 
 # ── 轮次（台账本体在 round/ledger.py，这里做 job 分组视图）───────────────

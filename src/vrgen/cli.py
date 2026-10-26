@@ -123,6 +123,20 @@ def _parse_kv(items: list[str] | None) -> dict[str, str]:
     return out
 
 
+def _image_role_args(roles: list[str] | None,
+                     notes: list[str] | None) -> tuple[list[str], list[str]]:
+    """校验 ``--image-role`` 与 ``--image-note`` 的配对。
+
+    note 可以整组省略；一旦提供，条数就必须与 role 相同，空字符串表示这张图
+    没有额外用途。role 与 image 的条数由调用方各自校验。
+    """
+    role_list = list(roles or ())
+    note_list = list(notes or ())
+    if note_list and len(note_list) != len(role_list):
+        raise UsageError("--image-note 的条数必须与 --image-role 相同")
+    return role_list, note_list
+
+
 def _parse_wh(text: str, what: str) -> tuple[int, int]:
     left, _, right = str(text).lower().partition("x")
     try:
@@ -335,9 +349,20 @@ app.add_typer(image_app, name="image")
 @image_app.command("submit")
 def image_submit(
     job: str = typer.Option(..., "--job", help="job 名（调用方通常传 case 名）。"),
-    prompt: str = typer.Option(..., "--prompt", help="图片提示词正文。"),
+    prompt: str = typer.Option(None, "--prompt", help="图片提示词正文；与 --template 二选一。"),
+    template: str = typer.Option(None, "--template",
+                                 help="提示词模板 id；由 vrgen 用草稿变量展开。"),
+    vars_file: str = typer.Option(jobs.PROMPT_VARS, "--vars-file",
+                                  help="模板变量草稿文件名（默认 prompt-vars.toml）。"),
     images: list[Path] = typer.Option(None, "--image", exists=True, dir_okay=False,
                                       help="参考图，可重复；按顺序传给 mglc。"),
+    image_roles: list[str] = typer.Option(
+        None, "--image-role", help="参考图角色，可重复；条数与 --image 相同，顺序对应。"),
+    image_notes: list[str] = typer.Option(
+        None, "--image-note",
+        help="参考图用途，可重复；条数与 --image 相同，空字符串表示没有用途。"),
+    step: str = typer.Option("", "--step",
+                             help="首尾帧工作台步骤：first | last；只写台账，不发给平台。"),
     model_id: int = typer.Option(None, "--model-id",
                                  help="图片模型 ID；缺省取 config 的 image_model_id。"),
     ratio: str = typer.Option(None, "--ratio", help="输出比例；缺省取 config 的 image_ratio。"),
@@ -354,6 +379,24 @@ def image_submit(
     log = Log()
     try:
         conf = config_mod.load(config)
+        if bool(prompt) == bool(template):
+            raise UsageError("--prompt 与 --template 必须二选一")
+        if step not in ("", "first", "last"):
+            raise UsageError(f"--step 只能是 first 或 last；当前是 {step!r}")
+        if image_roles and not template:
+            raise UsageError("--image-role 只在 --template 时使用")
+        if image_notes and not template:
+            raise UsageError("--image-note 只在 --template 时使用")
+        if template and len(image_roles or []) != len(images or []):
+            raise UsageError("--image-role 的条数必须与 --image 相同")
+        if image_notes and len(image_notes) != len(images or []):
+            raise UsageError("--image-note 的条数必须与 --image 相同")
+        roles, notes = _image_role_args(image_roles, image_notes)
+        resolved_prompt = prompt
+        if template:
+            extra = {"image_roles": image_mod.image_roles_text(roles, notes)}
+            resolved_prompt = jobs.render_template(workdir, job, template,
+                                                   vars_file=vars_file, extra=extra)
         resolved_model = int(model_id if model_id is not None
                              else conf.get("mglc.image_model_id", 44))
         resolved_ratio = str(ratio or conf.get("mglc.image_ratio", "16:9"))
@@ -362,10 +405,11 @@ def image_submit(
         resolved_session = int(session_id if session_id is not None
                                else conf.get("mglc.session_id", 0) or 0)
         pkg = image_mod.ImagePackage(
-            job=job, prompt=prompt, model_id=resolved_model,
+            job=job, prompt=resolved_prompt, model_id=resolved_model,
             images=tuple(images or ()), ratio=resolved_ratio,
             resolution=resolved_resolution, num=resolved_num,
-            workdir=jobs.job_dir(workdir, job), session_id=resolved_session)
+            workdir=jobs.job_dir(workdir, job), session_id=resolved_session,
+            step=step)
         prepared = kinds_mod.KINDS["image"].prepare_round(conf, pkg, log=log)
     except VrgenError as exc:
         _fail(exc)
@@ -518,7 +562,9 @@ def _echo_payload(payload: dict) -> None:
 
 def _prompt_preview(payload: dict, *, workdir, job: str,
                     refs: Path | None, mode: str | None,
-                    canvas: str | None, source: str | None) -> dict:
+                    canvas: str | None, source: str | None,
+                    image_roles: list[str] | None = None,
+                    image_notes: list[str] | None = None) -> dict:
     """给 prompt show/save 的返回补上展开后的正文（rendered / render_error）。
 
     预览只读：不建轮次、不碰平台。素材清单需要 ``--refs``；模式省略时读
@@ -539,6 +585,8 @@ def _prompt_preview(payload: dict, *, workdir, job: str,
         if canvas is not None and source is not None:
             variables.update(prompt_mod.geometry_from_sizes(
                 _parse_wh(canvas, "--canvas"), _parse_wh(source, "--source")))
+        if image_roles:
+            variables["image_roles"] = image_mod.image_roles_text(image_roles, image_notes)
         payload["rendered"] = prompt_mod.render(text, variables)
         payload["render_error"] = None
     except (VrgenError, OSError, ValueError) as exc:
@@ -551,22 +599,34 @@ def _prompt_preview(payload: dict, *, workdir, job: str,
 def prompt_show(
     job: str = typer.Option(..., "--job", help="job 名（调用方通常传 case 名）。"),
     template: str = typer.Option(None, "--template", help="覆盖草稿/配置的模板选择。"),
+    vars_file: str = typer.Option(jobs.PROMPT_VARS, "--vars-file",
+                                  help="变量草稿文件名（默认 prompt-vars.toml）。"),
     workdir: Path = typer.Option(None, "--workdir", help="台账根（默认 $VRGEN_RUNS_DIR）。"),
     refs: Path = typer.Option(None, "--refs", exists=True, dir_okay=False,
                               help="gen 素材清单 JSON；提供后展开素材清单。"),
     mode: str = typer.Option(None, "--mode",
                              help="生成模式；省略时读 generation.toml。"),
+    image_roles: list[str] = typer.Option(
+        None, "--image-role", help="参考图角色，可重复；与 --image 顺序对应，展开 image_roles。"),
+    image_notes: list[str] = typer.Option(
+        None, "--image-note", help="参考图用途，可重复；与 --image-role 顺序对应。"),
     canvas: str = typer.Option(None, "--canvas", help="画布尺寸 WxH；展开几何占位用。"),
     source: str = typer.Option(None, "--source", help="源尺寸 WxH；展开几何占位用。"),
 ) -> None:
     """读模板与变量草稿：正文、占位符、几何键、[vars] 当前值。"""
     try:
         payload = jobs.prompt_overview(workdir, job, template=template,
-                                       config_default=_prompt_default())
+                                       config_default=_prompt_default(),
+                                       vars_file=vars_file)
+    except VrgenError as exc:
+        _fail(exc)
+    try:
+        roles, notes = _image_role_args(image_roles, image_notes)
     except VrgenError as exc:
         _fail(exc)
     payload = _prompt_preview(payload, workdir=workdir, job=job, refs=refs,
-                              mode=mode, canvas=canvas, source=source)
+                              mode=mode, canvas=canvas, source=source,
+                              image_roles=roles, image_notes=notes)
     _echo_payload(payload)
 
 
@@ -578,23 +638,35 @@ def prompt_save(
     unsets: list[str] = typer.Option(None, "--unset",
                                      help="删除变量；模板正文引用的键拒绝删除。"),
     template: str = typer.Option(None, "--template", help="切换模板 id（必须存在）。"),
+    vars_file: str = typer.Option(jobs.PROMPT_VARS, "--vars-file",
+                                  help="变量草稿文件名（默认 prompt-vars.toml）。"),
     workdir: Path = typer.Option(None, "--workdir", help="台账根（默认 $VRGEN_RUNS_DIR）。"),
     refs: Path = typer.Option(None, "--refs", exists=True, dir_okay=False,
                               help="gen 素材清单 JSON；提供后展开素材清单。"),
     mode: str = typer.Option(None, "--mode",
                              help="生成模式；省略时读 generation.toml。"),
+    image_roles: list[str] = typer.Option(
+        None, "--image-role", help="参考图角色，可重复；与 --image 顺序对应，展开 image_roles。"),
+    image_notes: list[str] = typer.Option(
+        None, "--image-note", help="参考图用途，可重复；与 --image-role 顺序对应。"),
     canvas: str = typer.Option(None, "--canvas", help="画布尺寸 WxH；展开几何占位用。"),
     source: str = typer.Option(None, "--source", help="源尺寸 WxH；展开几何占位用。"),
 ) -> None:
-    """编辑变量草稿并写回 prompt-vars.toml（JSON 回显保存后的状态）。"""
+    """编辑变量草稿并写回指定的 .toml（JSON 回显保存后的状态）。"""
     try:
         payload = jobs.edit_prompt_vars(workdir, job, sets=_parse_kv(sets),
                                         unsets=unsets, template=template,
-                                        config_default=_prompt_default())
+                                        config_default=_prompt_default(),
+                                        vars_file=vars_file)
+    except VrgenError as exc:
+        _fail(exc)
+    try:
+        roles, notes = _image_role_args(image_roles, image_notes)
     except VrgenError as exc:
         _fail(exc)
     payload = _prompt_preview(payload, workdir=workdir, job=job, refs=refs,
-                              mode=mode, canvas=canvas, source=source)
+                              mode=mode, canvas=canvas, source=source,
+                              image_roles=roles, image_notes=notes)
     _echo_payload(payload)
 
 

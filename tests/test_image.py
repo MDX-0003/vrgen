@@ -9,10 +9,14 @@ from typer.testing import CliRunner
 
 from vrgen import cli as vrgen_cli
 from vrgen import config as config_mod
+from vrgen import jobs
+from vrgen.paths import templates_dir
+from vrgen.prep.prompt import template_aliases, template_help
 from vrgen.progress import Log
 from vrgen.round import image as image_mod
 from vrgen.round.image import ImagePackage, prepare_image_round
 from vrgen.round.ledger import RunStore
+from vrgen.round.task import extract_task_ids
 
 runner = CliRunner()
 
@@ -57,9 +61,9 @@ class _Response:
         return self.data
 
 
-def _images(tmp_path: Path) -> tuple[Path, ...]:
+def _images(tmp_path: Path, count: int = 2) -> tuple[Path, ...]:
     out = []
-    for index in (1, 2):
+    for index in range(1, count + 1):
         path = tmp_path / f"i{index}.png"
         path.write_bytes(f"png-{index}".encode())
         out.append(path)
@@ -113,6 +117,51 @@ def test_image_round_lifecycle(tmp_path, monkeypatch):
     assert generate.count("--image ") == 2
 
 
+def test_extract_task_ids_reads_every_sibling():
+    payload = {"data": [{"taskId": 11, "imageId": 12},
+                        {"taskId": 13, "imageId": 14}]}
+    assert extract_task_ids(payload) == [11, 13]
+    assert extract_task_ids({"data": {"taskIds": [11, 13]}}) == [11, 13]
+
+
+def test_image_batch_polls_and_downloads_every_task(tmp_path, monkeypatch):
+    images = _images(tmp_path)
+    conf = _conf(tmp_path)
+    pkg = _package(tmp_path, images)
+    prepared = prepare_image_round(conf, pkg, log=Log(quiet=True))
+    from vrgen.platform.client import Mglc
+    from vrgen.prep.budget import InputSpec
+
+    monkeypatch.setattr(image_mod, "probe_image", lambda path, config=None: InputSpec(
+        width=1920, height=1080, fps=0.0, duration_s=0.0,
+        size_bytes=1000, container=("png",)))
+    calls: list[str] = []
+
+    def run(argv, timeout):
+        joined = " ".join(argv)
+        calls.append(joined)
+        if "image generate" in joined:
+            return _Proc({"code": 0, "data": {"tasks": [
+                {"taskId": 11, "imageId": 12},
+                {"taskId": 13, "imageId": 14}]}})
+        if "task status" in joined:
+            suffix = "a" if "--task-id 11" in joined else "b"
+            return _Proc({"code": 0, "data": {"status": 2, "images": [
+                {"imageUrl": f"https://example.invalid/{suffix}.png"}]}})
+        return _Proc({"code": 0, "data": {}})
+
+    def opener(url, timeout):
+        return _Response(b"png-bytes")
+
+    client = Mglc(binary="mglc-fake", runner=run)
+    outcome = image_mod.execute_image_round(
+        conf, pkg, prepared, client=client, log=Log(quiet=True), opener=opener)
+    assert outcome.run.task_id == 11
+    assert outcome.run.task_ids == [11, 13]
+    assert len(outcome.results) == 2
+    assert {path.name for path in outcome.results} == {"result_1.png", "result_2.png"}
+
+
 def test_image_submit_dry_run(tmp_path):
     images = _images(tmp_path)
     result = runner.invoke(vrgen_cli.app, [
@@ -124,6 +173,171 @@ def test_image_submit_dry_run(tmp_path):
     run = RunStore(tmp_path / "runs" / "j").all()[0]
     assert run.params["kind"] == "image" and run.task_id is None
     assert "no external calls" in (run.dir / "mglc.log").read_text(encoding="utf-8")
+
+
+def _seed_keyframe_vars(root: Path, step: str = "first") -> None:
+    jobs.edit_prompt_vars(
+        root, "j",
+        sets={"figure": "老年文官，黑冠红袍",
+              "pose_first": "坐在矮案后，面向画面右侧",
+              "pose_last": "站在红毯中央，双手垂在身前",
+              "preserve": "机位、场景与光照保持图1原样"},
+        template=f"keyframe-{step}", vars_file="keyframe-vars.toml")
+
+
+def test_image_submit_renders_template(tmp_path):
+    images = _images(tmp_path)
+    root = tmp_path / "runs"
+    _seed_keyframe_vars(root)
+    result = runner.invoke(vrgen_cli.app, [
+        "image", "submit", "--job", "j",
+        "--template", "keyframe-first", "--vars-file", "keyframe-vars.toml",
+        "--step", "first",
+        "--image-role", "first_frame_raw", "--image-role", "subject_ref",
+        "--image", str(images[0]), "--image", str(images[1]),
+        "--workdir", str(root), "--dry-run"])
+    assert result.exit_code == 0, result.output
+    run = RunStore(root / "j").all()[0]
+    assert run.params["kind"] == "image"
+    assert run.params["step"] == "first"
+    prompt = run.prompt_path.read_text(encoding="utf-8")
+    assert "老年文官" in prompt
+    assert "图1 = 首帧原始图" in prompt
+    assert "图2 = 人物三视图" in prompt
+    assert "{" not in prompt and "|" not in prompt
+
+
+def test_image_submit_rejects_prompt_and_template_together(tmp_path):
+    images = _images(tmp_path)
+    root = tmp_path / "runs"
+    _seed_keyframe_vars(root)
+    result = runner.invoke(vrgen_cli.app, [
+        "image", "submit", "--job", "j", "--prompt", "p",
+        "--template", "keyframe-first", "--vars-file", "keyframe-vars.toml",
+        "--image-role", "first_frame_raw", "--image", str(images[0]),
+        "--workdir", str(root), "--dry-run"])
+    assert result.exit_code == 2
+
+
+def test_image_submit_rejects_role_count_mismatch(tmp_path):
+    images = _images(tmp_path)
+    root = tmp_path / "runs"
+    _seed_keyframe_vars(root)
+    result = runner.invoke(vrgen_cli.app, [
+        "image", "submit", "--job", "j",
+        "--template", "keyframe-first", "--vars-file", "keyframe-vars.toml",
+        "--image-role", "first_frame_raw",
+        "--image", str(images[0]), "--image", str(images[1]),
+        "--workdir", str(root), "--dry-run"])
+    assert result.exit_code == 2
+
+
+def test_image_roles_text_includes_notes():
+    text = image_mod.image_roles_text(
+        ["first_frame_raw", "subject_ref", "detail_ref"],
+        ["", "", "头冠纹样与金色饰物。"])
+    assert "图1 = 首帧原始图（场景、机位与占位位置底图）。" in text
+    assert "图2 = 人物三视图（唯一外观依据）。" in text
+    assert ("图3 = 细节参考图（只继承所指细节的外观，不取构图、背景与姿态）"
+            "：头冠纹样与金色饰物。") in text
+
+
+def test_image_submit_renders_detail_refs(tmp_path):
+    images = _images(tmp_path, 3)
+    root = tmp_path / "runs"
+    _seed_keyframe_vars(root)
+    result = runner.invoke(vrgen_cli.app, [
+        "image", "submit", "--job", "j",
+        "--template", "keyframe-first", "--vars-file", "keyframe-vars.toml",
+        "--step", "first",
+        "--image-role", "first_frame_raw", "--image-role", "subject_ref",
+        "--image-role", "detail_ref",
+        "--image-note", "", "--image-note", "", "--image-note", "头冠纹样与金色饰物",
+        "--image", str(images[0]), "--image", str(images[1]), "--image", str(images[2]),
+        "--workdir", str(root), "--dry-run"])
+    assert result.exit_code == 0, result.output
+    run = RunStore(root / "j").all()[0]
+    prompt = run.prompt_path.read_text(encoding="utf-8")
+    assert "图3 = 细节参考图" in prompt
+    assert "头冠纹样与金色饰物" in prompt
+    assert "图3 = 首帧定稿" not in prompt
+
+
+def test_image_submit_rejects_note_count_mismatch(tmp_path):
+    images = _images(tmp_path)
+    root = tmp_path / "runs"
+    _seed_keyframe_vars(root)
+    result = runner.invoke(vrgen_cli.app, [
+        "image", "submit", "--job", "j",
+        "--template", "keyframe-first", "--vars-file", "keyframe-vars.toml",
+        "--image-role", "first_frame_raw", "--image-role", "subject_ref",
+        "--image-note", "只有一条",
+        "--image", str(images[0]), "--image", str(images[1]),
+        "--workdir", str(root), "--dry-run"])
+    assert result.exit_code == 2
+
+
+def test_image_submit_rejects_note_without_template(tmp_path):
+    images = _images(tmp_path)
+    result = runner.invoke(vrgen_cli.app, [
+        "image", "submit", "--job", "j", "--prompt", "p",
+        "--image-note", "x",
+        "--image", str(images[0]),
+        "--workdir", str(tmp_path / "runs"), "--dry-run"])
+    assert result.exit_code == 2
+
+
+def test_prompt_show_renders_image_roles_with_notes(tmp_path):
+    root = tmp_path / "runs"
+    _seed_keyframe_vars(root)
+    result = runner.invoke(vrgen_cli.app, [
+        "prompt", "show", "--job", "j",
+        "--template", "keyframe-first", "--vars-file", "keyframe-vars.toml",
+        "--image-role", "first_frame_raw", "--image-role", "subject_ref",
+        "--image-role", "detail_ref",
+        "--image-note", "", "--image-note", "", "--image-note", "袖口纹样",
+        "--workdir", str(root)])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert "图3 = 细节参考图" in payload["rendered"]
+    assert "袖口纹样" in payload["rendered"]
+
+
+def test_keyframe_templates_do_not_hardcode_positions():
+    for name in ("keyframe-first.md", "keyframe-last.md"):
+        text = (templates_dir() / name).read_text(encoding="utf-8")
+        assert "图2" not in text
+        assert "图3" not in text
+
+
+def test_prompt_show_renders_image_roles(tmp_path):
+    root = tmp_path / "runs"
+    _seed_keyframe_vars(root)
+    result = runner.invoke(vrgen_cli.app, [
+        "prompt", "show", "--job", "j",
+        "--template", "keyframe-first", "--vars-file", "keyframe-vars.toml",
+        "--image-role", "first_frame_raw", "--image-role", "subject_ref",
+        "--workdir", str(root)])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert "image_roles" in payload["computed_keys"]
+    assert "图1 = 首帧原始图" in payload["rendered"]
+    assert "图2 = 人物三视图" in payload["rendered"]
+
+
+def test_keyframe_vars_file_isolated(tmp_path):
+    root = tmp_path / "runs"
+    _seed_keyframe_vars(root)
+    assert jobs.load_prompt_vars(root, "j").vars == {}
+    assert jobs.load_prompt_vars(root, "j", "keyframe-vars.toml").vars["figure"]
+
+
+def test_keyframe_templates_share_shared_aliases():
+    first = (templates_dir() / "keyframe-first.md").read_text(encoding="utf-8")
+    last = (templates_dir() / "keyframe-last.md").read_text(encoding="utf-8")
+    for key in ("figure", "preserve"):
+        assert template_aliases(first)[key] == template_aliases(last)[key]
+        assert template_help(first)[key] == template_help(last)[key]
 
 
 def test_result_index_copies_nth_candidate(tmp_path):

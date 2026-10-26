@@ -49,6 +49,7 @@ class Run:
     mask: dict[str, Any] | None = None
     assets: dict[str, int] = field(default_factory=dict)        # kind -> asset id
     task_id: int | None = None
+    task_ids: list[int] | None = None      # image batches: one id per sibling task
     result: str | None = None
     results: list[str] | None = None       # image rounds: every candidate
     gate: dict[str, Any] | None = None
