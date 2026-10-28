@@ -7,9 +7,9 @@ gen）共用同一种清单：流程产物 clip/pad 与文件素材没有区别�
 附带的内部控制图。
 
 数量、格式、时长、比例的上限以模型详情的 validator 为唯一依据；这里只保留平台
-接不住的五条语义规则：firstLastFrame 恰好一对首尾帧、至多一个 edit_master 且
-必须是第一条视频、mask 只能是图片、lighting_ref 只能是图片、``*_raw`` 角色不能
-进入 refs。
+接不住的语义规则：firstLastFrame 恰好一对首尾帧、至多一个 edit_master 且必须是
+第一条视频、``*_raw`` 角色不能进入 refs，以及 ``roles.json`` 里的种类限制
+（``check_kinds``，例如 mask 与 lighting_ref 只能是图片）。
 """
 
 from __future__ import annotations
@@ -21,39 +21,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import UsageError
+from .roles import RAW_ROLES, ROLE_PROMPT, ROLES, check_kinds
 
 KINDS = ("video", "image")
-ROLES = (
-    "edit_master", "motion_ref", "space_ref", "scene_ref", "lighting_ref",
-    "subject_ref",
-    "first_frame", "last_frame", "mid_frame", "first_frame_raw", "last_frame_raw",
-    "mask",
-)
-
-#: 只给关键帧工作台当前端输入的角色；不能进入 refs 清单。
-RAW_ROLES = ("first_frame_raw", "last_frame_raw")
 
 SUPPORTED_MODES = ("videoEdit", "allMediaRef", "videoExtend", "firstLastFrame")
 
 #: 清单 id：字母开头，其余字母数字下划线连字符（用户素材 v1/i1、流程产物 clip/pad…）。
 _ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
-
-#: 提示词里的角色说明；顺序与 case.toml 的 assets 顺序一致。
-ROLE_PROMPT = {
-    "edit_master": "编辑母版，负责时间轴、构图与动作基准。",
-    "motion_ref": "动作参考，只提供动作节奏与路径。",
-    "space_ref": "空间参考，只提供机位、构图、起点与终点位置；不提供人物动作。",
-    "scene_ref": "场景参考，只提供构图、背景与光照。",
-    "lighting_ref": "光照参考，只提供光源位置、色温、明暗对比与空气质感；"
-                    "不提供构图、机位、背景与任何画面内容。",
-    "subject_ref": "主体参考，只定义角色外观。",
-    "first_frame": "首帧定稿图，视频的第一帧，锁定起点构图与人物外观。",
-    "last_frame": "尾帧定稿图，视频的最后一帧，锁定终点位置、大小与朝向。",
-    "mid_frame": "中间过渡帧，仅在首尾间距过大时补充。",
-    "first_frame_raw": "工作台输入底图（原始抽取帧），只提供场景与占位，不是生成素材。",
-    "last_frame_raw": "工作台输入底图（原始抽取帧），只提供场景与占位，不是生成素材。",
-    "mask": "编辑区域标注，不作为画面内容参考。",
-}
 
 _ROLE_RULES = {
     "videoEdit": {
@@ -152,7 +127,7 @@ def load_refs(path: str | Path) -> tuple[RefAsset, ...]:
 
 
 def validate_mode(refs: tuple[RefAsset, ...], mode: str) -> None:
-    """四条语义规则；数量与格式由模型详情 validator 负责。"""
+    """语义规则；数量与格式由模型详情 validator 负责。"""
     if mode not in SUPPORTED_MODES:
         raise UsageError(
             f"模式 {mode!r} 不在本期支持范围（{', '.join(SUPPORTED_MODES)}）")
@@ -160,11 +135,9 @@ def validate_mode(refs: tuple[RefAsset, ...], mode: str) -> None:
         if asset.role in RAW_ROLES:
             raise UsageError(
                 f"素材 {asset.id} 的角色 {asset.role} 只用于关键帧工作台，不能提交")
-        if asset.role == "mask" and asset.kind != "image":
-            raise UsageError(f"素材 {asset.id} 的 mask 角色只能是图片")
-        if asset.role == "lighting_ref" and asset.kind != "image":
-            raise UsageError(
-                f"素材 {asset.id} 的 lighting_ref 角色只能是图片（光照参考是单帧图片）")
+        reason = check_kinds(asset.role, asset.kind)
+        if reason:
+            raise UsageError(f"素材 {asset.id}：{reason}")
     videos = [a for a in refs if a.kind == "video"]
     masters = [a for a in videos if a.role == "edit_master"]
     if len(masters) > 1:
