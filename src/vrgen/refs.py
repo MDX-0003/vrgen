@@ -1,4 +1,4 @@
-"""提交清单：解析 ``--refs`` JSON、四条语义校验、生成提示词素材块。
+"""提交清单：解析 ``--refs`` JSON、五条语义校验、生成提示词素材块。
 
 素材清单是 vrstudio 与 vrgen 之间的唯一提交入口（契约
 ``docs/case-model.md`` §4）。vrgen 不知道 case.toml 的存在，只认这份清单里的
@@ -7,8 +7,9 @@ gen）共用同一种清单：流程产物 clip/pad 与文件素材没有区别�
 附带的内部控制图。
 
 数量、格式、时长、比例的上限以模型详情的 validator 为唯一依据；这里只保留平台
-接不住的四条语义规则：firstLastFrame 恰好一对首尾帧、至多一个 edit_master 且
-必须是第一条视频、mask 只能是图片、``*_raw`` 角色不能进入 refs。
+接不住的五条语义规则：firstLastFrame 恰好一对首尾帧、至多一个 edit_master 且
+必须是第一条视频、mask 只能是图片、lighting_ref 只能是图片、``*_raw`` 角色不能
+进入 refs。
 """
 
 from __future__ import annotations
@@ -23,7 +24,8 @@ from .errors import UsageError
 
 KINDS = ("video", "image")
 ROLES = (
-    "edit_master", "motion_ref", "space_ref", "scene_ref", "subject_ref",
+    "edit_master", "motion_ref", "space_ref", "scene_ref", "lighting_ref",
+    "subject_ref",
     "first_frame", "last_frame", "mid_frame", "first_frame_raw", "last_frame_raw",
     "mask",
 )
@@ -42,6 +44,8 @@ ROLE_PROMPT = {
     "motion_ref": "动作参考，只提供动作节奏与路径。",
     "space_ref": "空间参考，只提供机位、构图、起点与终点位置；不提供人物动作。",
     "scene_ref": "场景参考，只提供构图、背景与光照。",
+    "lighting_ref": "光照参考，只提供光源位置、色温、明暗对比与空气质感；"
+                    "不提供构图、机位、背景与任何画面内容。",
     "subject_ref": "主体参考，只定义角色外观。",
     "first_frame": "首帧定稿图，视频的第一帧，锁定起点构图与人物外观。",
     "last_frame": "尾帧定稿图，视频的最后一帧，锁定终点位置、大小与朝向。",
@@ -54,7 +58,7 @@ ROLE_PROMPT = {
 _ROLE_RULES = {
     "videoEdit": {
         "task": "只编辑编辑母版 @Video1：把指定主体重绘成目标外观；"
-                "其他视频只作动作或场景参考，图片只定义角色外观。",
+                "其他视频只作动作或场景参考，图片只定义角色外观或提供光照参考。",
         "timeline": "动作顺序、起止时间、行进方向与画面位置与编辑母版一致；"
                     "不得插入新的动作事件。",
     },
@@ -158,6 +162,9 @@ def validate_mode(refs: tuple[RefAsset, ...], mode: str) -> None:
                 f"素材 {asset.id} 的角色 {asset.role} 只用于关键帧工作台，不能提交")
         if asset.role == "mask" and asset.kind != "image":
             raise UsageError(f"素材 {asset.id} 的 mask 角色只能是图片")
+        if asset.role == "lighting_ref" and asset.kind != "image":
+            raise UsageError(
+                f"素材 {asset.id} 的 lighting_ref 角色只能是图片（光照参考是单帧图片）")
     videos = [a for a in refs if a.kind == "video"]
     masters = [a for a in videos if a.role == "edit_master"]
     if len(masters) > 1:

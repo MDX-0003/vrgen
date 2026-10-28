@@ -213,3 +213,19 @@ def test_new_role_prompt_wording(tmp_path):
     first_last = mode_variables("firstLastFrame")
     assert "首帧" in first_last["task_rule"]
     assert "尾帧" in first_last["task_rule"]
+
+
+def test_lighting_ref_only_gives_lighting(tmp_path):
+    image = _file(tmp_path / "i1.png")
+    video = _file(tmp_path / "v.mp4")
+    text = asset_list((
+        RefAsset("pad", "video", "edit_master", video),
+        RefAsset("i1", "image", "lighting_ref", image),
+    ))
+    assert "@Image1：光照参考" in text
+    assert "色温、明暗对比与空气质感" in text
+    assert "不提供构图" in text
+    # 光照参考按一帧读光照，视频不能承担这个角色。
+    with pytest.raises(UsageError, match="lighting_ref"):
+        validate_mode((RefAsset("v2", "video", "lighting_ref", video),), "videoEdit")
+    validate_mode((RefAsset("i1", "image", "lighting_ref", image),), "videoEdit")
