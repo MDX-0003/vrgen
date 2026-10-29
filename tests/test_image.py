@@ -90,6 +90,9 @@ def test_image_round_lifecycle(tmp_path, monkeypatch):
     prepared = prepare_image_round(conf, pkg, log=Log(quiet=True))
     assert prepared.run.params["kind"] == "image"
     assert prepared.run.dir.name.startswith("img-")
+    # the printed round is a directory name; `result --round` must accept it
+    store = RunStore(prepared.run.dir.parent)
+    assert store.open(prepared.run.dir.name).key == prepared.run.key
 
     from vrgen.platform.client import Mglc
     from vrgen.prep.budget import InputSpec

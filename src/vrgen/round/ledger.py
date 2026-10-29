@@ -210,7 +210,8 @@ class RunStore:
         if target.parent != Path(".") and (target.parent / RUN_FILE).is_file():
             return Run.load(target.parent)
         prefix = str(target)
-        matches = [r for r in self.all() if r.key.startswith(prefix)]
+        matches = [r for r in self.all()
+                   if r.key.startswith(prefix) or r.dir.name == prefix]
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
