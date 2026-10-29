@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from vrgen import cli as vrgen_cli
 from vrgen import config as config_mod
 from vrgen import jobs
+from vrgen.errors import UsageError
 from vrgen.paths import templates_dir
 from vrgen.prep.prompt import template_aliases, template_help
 from vrgen.progress import Log
@@ -240,6 +242,59 @@ def test_image_roles_text_includes_notes():
     assert "图2 = 人物三视图（唯一外观依据）。" in text
     assert ("图3 = 细节参考图（只继承所指细节的外观，不取构图、背景与姿态）"
             "：头冠纹样与金色饰物。") in text
+
+
+def test_image_roles_text_covers_still_roles():
+    text = image_mod.image_roles_text(["edit_master", "mask"])
+    assert "图1 = 待重绘的 360 视口底图（本轮唯一要修改的底图）。" in text
+    assert "图2 = 掩码图（黑色区域需要重绘，白色区域保持原样）。" in text
+
+
+def test_still360_local_template_renders(tmp_path):
+    images = _images(tmp_path)
+    root = tmp_path / "runs"
+    jobs.edit_prompt_vars(
+        root, "j",
+        sets={"edit": "把画中的人换成长袍文官",
+              "preserve": "机位、场景与光照保持图1原样"},
+        template="still360-local", vars_file="still-vars.toml")
+    result = runner.invoke(vrgen_cli.app, [
+        "image", "submit", "--job", "j",
+        "--template", "still360-local", "--vars-file", "still-vars.toml",
+        "--image-role", "edit_master", "--image-role", "mask",
+        "--image", str(images[0]), "--image", str(images[1]),
+        "--workdir", str(root), "--dry-run"])
+    assert result.exit_code == 0, result.output
+    run = RunStore(root / "j").all()[0]
+    prompt = run.prompt_path.read_text(encoding="utf-8")
+    assert "图1 = 待重绘的 360 视口底图" in prompt
+    assert "图2 = 掩码图" in prompt
+    assert "长袍文官" in prompt
+    assert "{" not in prompt and "|" not in prompt
+
+
+def test_ref_image_validator_finds_a_nested_block():
+    data = {"modelConfig": {"referenceModes": [
+        {"mode": "edit", "refImageValidator": {"maxWidth": 10}}]}}
+    assert image_mod._ref_image_validator(data) == {"maxWidth": 10}
+    assert image_mod._ref_image_validator({"modelConfig": {}}) == {}
+
+
+def test_check_input_images_rejects_a_too_wide_input(tmp_path, monkeypatch):
+    images = _images(tmp_path, 1)
+    from vrgen.prep.budget import InputSpec
+    monkeypatch.setattr(
+        image_mod, "probe_image",
+        lambda path, config=None: InputSpec(
+            width=64, height=32, fps=0.0, duration_s=0.0, size_bytes=100,
+            container=("png",)))
+    with pytest.raises(UsageError, match="width"):
+        image_mod._check_input_images(
+            _conf(tmp_path), images,
+            {"modelConfig": {"referenceModes": [
+                {"refImageValidator": {"maxWidth": 10}}]}})
+    # No validator published: the check is a no-op, not a false failure.
+    image_mod._check_input_images(_conf(tmp_path), images, {"modelConfig": {}})
 
 
 def test_image_submit_renders_detail_refs(tmp_path):

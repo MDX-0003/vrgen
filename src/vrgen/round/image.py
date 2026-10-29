@@ -21,7 +21,7 @@ from ..errors import AigcError, UsageError
 from ..paths import sha256_16
 from ..platform.client import Mglc
 from ..platform.media import probe_image
-from ..prep.budget import InputSpec
+from ..prep.budget import InputSpec, check_image
 from .ledger import Run, RunStore, run_key, write_command
 from .task import extract_task_ids, result_urls
 from .task import wait as wait_task
@@ -36,6 +36,8 @@ IMAGE_ROLE_TEXT = {
     "first_frame": "首帧定稿图（同一人物的身份锚点）",
     "last_frame": "尾帧定稿图（同一人物的身份锚点）",
     "detail_ref": "细节参考图（只继承所指细节的外观，不取构图、背景与姿态）",
+    "edit_master": "待重绘的 360 视口底图（本轮唯一要修改的底图）",
+    "mask": "掩码图（黑色区域需要重绘，白色区域保持原样）",
 }
 
 
@@ -162,6 +164,7 @@ def execute_image_round(conf, pkg: ImagePackage, prepared: ImagePrepared, *,
     if run.task_id is None:
         detail = client.model_detail(int(pkg.model_id), model_type="image")
         _validate_model_detail(detail.data, pkg.ratio, pkg.resolution)
+        _check_input_images(conf, pkg.images, detail.data)
         argv = build_image_argv(
             prompt=pkg.prompt, model_id=pkg.model_id, images=list(pkg.images),
             ratio=pkg.ratio, resolution=pkg.resolution, num=pkg.num,
@@ -249,6 +252,42 @@ def _validate_model_detail(data: Any, ratio: str, resolution: str) -> None:
     if resolutions and resolution not in resolutions:
         raise UsageError(
             f"图片模型只接受这些分辨率档：{', '.join(resolutions)}；当前是 {resolution!r}")
+
+
+def _ref_image_validator(node: Any) -> Mapping[str, object]:
+    """Find the first ``refImageValidator`` block in a model detail payload."""
+    if isinstance(node, Mapping):
+        candidate = node.get("refImageValidator")
+        if isinstance(candidate, Mapping):
+            return candidate
+        for value in node.values():
+            found = _ref_image_validator(value)
+            if found:
+                return found
+    elif isinstance(node, (list, tuple)):
+        for item in node:
+            found = _ref_image_validator(item)
+            if found:
+                return found
+    return {}
+
+
+def _check_input_images(conf, images: tuple[Path, ...], detail: Any) -> None:
+    """Fail before submission when an input image exceeds the model's limits.
+
+    The image path used to pass paths straight to ``mglc``; a validator block in
+    the model detail is the platform's own statement of the caps, so checking it
+    here turns a paid rejection into a local error naming the failing side.
+    """
+    validator = _ref_image_validator(detail)
+    if not validator:
+        return
+    for image in images:
+        spec = probe_image(str(image), conf)
+        report = check_image(spec, validator)
+        if not report.ok:
+            failures = "; ".join(check.line() for check in report.failures)
+            raise UsageError(f"输入图超出模型限额：{image}：{failures}")
 
 
 def _fetch_all(client: Mglc, run: Run, *, opener=None, log=None) -> tuple[Path, ...]:
