@@ -146,7 +146,8 @@ GENERATION = "generation.toml"
 
 @dataclass
 class GenerationParams:
-    model_id: int | None = None     # mglc 视频模型 ID；None = 用 config 默认
+    video_model_id: int | None = None  # mglc 视频模型 ID；None = 用 config 默认
+    image_model_id: int | None = None  # mglc 图片模型 ID；None = 用 config 默认
     resolution: str | None = None   # mglc 输出档位 480p/720p/1080p/4K
     scale: str | None = None        # vrgen 上传缩放 auto/full/half
     mode: str | None = None         # mglc 生成模式 videoEdit/allMediaRef/videoExtend
@@ -160,12 +161,24 @@ def generation_params_path(workdir: str | Path | None, job: str) -> Path:
     return job_dir(workdir, job) / GENERATION
 
 
+def _positive_int_field(data: dict, key: str, path: Path) -> int | None:
+    value = data.get(key)
+    if value is not None and (isinstance(value, bool)
+                              or not isinstance(value, int) or value < 1):
+        raise UsageError(f"{path}: {key} 必须是正整数")
+    return value
+
+
 def load_generation_params(workdir: str | Path | None, job: str) -> GenerationParams:
     path = generation_params_path(workdir, job)
     if not path.is_file():
         return GenerationParams()
     data = tomllib.loads(path.read_text(encoding="utf-8"))
-    model_id = data.get("model_id")
+    video_model_id = _positive_int_field(data, "video_model_id", path)
+    if video_model_id is None:
+        # 旧草稿键 model_id 是视频模型（改名前唯一写过的模型键）
+        video_model_id = _positive_int_field(data, "model_id", path)
+    image_model_id = _positive_int_field(data, "image_model_id", path)
     resolution = data.get("resolution")
     scale = data.get("scale")
     mode = data.get("mode")
@@ -177,16 +190,15 @@ def load_generation_params(workdir: str | Path | None, job: str) -> GenerationPa
                        ("mode", mode), ("aspect_ratio", aspect_ratio)):
         if value is not None and not isinstance(value, str):
             raise UsageError(f"{path}: {key} 必须是字符串")
-    if model_id is not None and (isinstance(model_id, bool)
-                                 or not isinstance(model_id, int) or model_id < 1):
-        raise UsageError(f"{path}: model_id 必须是正整数")
     for key, value in (("session_id", session_id), ("project_id", project_id),
                        ("episode", episode)):
         if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
             raise UsageError(f"{path}: {key} 必须是整数")
         if value is not None and value < 0:
             raise UsageError(f"{path}: {key} 必须 >= 0")
-    return GenerationParams(model_id=model_id, resolution=resolution, scale=scale,
+    return GenerationParams(video_model_id=video_model_id,
+                            image_model_id=image_model_id,
+                            resolution=resolution, scale=scale,
                             mode=mode, aspect_ratio=aspect_ratio,
                             session_id=session_id or None,
                             project_id=project_id or None,
@@ -198,8 +210,10 @@ def save_generation_params(workdir: str | Path | None, job: str,
     path = generation_params_path(workdir, job)
     path.parent.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []
-    if params.model_id:
-        lines.append(f"model_id = {int(params.model_id)}")
+    if params.video_model_id:
+        lines.append(f"video_model_id = {int(params.video_model_id)}")
+    if params.image_model_id:
+        lines.append(f"image_model_id = {int(params.image_model_id)}")
     if params.resolution is not None:
         lines.append(_toml_str("resolution", params.resolution))
     if params.scale is not None:

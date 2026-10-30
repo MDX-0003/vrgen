@@ -22,7 +22,7 @@ from .errors import TaskFailed, UsageError, VrgenError
 from .paths import templates_dir
 from .platform.client import Mglc
 from .platform.media import probe_image, probe_input
-from .platform.models import find_model, load_models
+from .platform.models import dropdown_models, find_model, load_image_models, load_models
 from .prep import params as params_mod
 from .prep import prompt as prompt_mod
 from .progress import Log
@@ -58,19 +58,21 @@ def _root(
 # ── mglc 后端：submit ────────────────────────────────────────────────────
 
 
-def _apply_generation_params(conf, workdir, job, *, model_id, mode, resolution,
+def _apply_generation_params(conf, workdir, job, *, video_model_id, mode, resolution,
                              duration, num, aspect_ratio, scale, session_id=None) -> None:
     """Resolve submit parameters: CLI > generation.toml > config.
 
     Every option except ``scale`` maps one-to-one onto a ``mglc video generate``
-    flag (``--mode`` is mglc ``--type``). ``scale`` is vrgen's own upload
-    decision and has no mglc counterpart; it changes the prompt geometry.
-    ``session_id`` selects a project generation session, so the spend is billed
-    to that project's balance instead of the personal one.
+    flag (``--mode`` is mglc ``--type``; ``--video-model-id`` is mglc
+    ``--model-id``). ``scale`` is vrgen's own upload decision and has no mglc
+    counterpart; it changes the prompt geometry. ``session_id`` selects a project
+    generation session, so the spend is billed to that project's balance instead
+    of the personal one.
     """
     saved = jobs.load_generation_params(workdir, job)
     picks = {
-        "model_id": model_id if model_id is not None else saved.model_id,
+        "video_model_id": (video_model_id if video_model_id is not None
+                           else saved.video_model_id),
         "mode": mode if mode is not None else saved.mode,
         "resolution": resolution if resolution is not None else saved.resolution,
         "duration_s": duration,
@@ -84,8 +86,8 @@ def _apply_generation_params(conf, workdir, job, *, model_id, mode, resolution,
         if value is not None:
             conf.data["mglc"][key] = value
 
-    if int(conf.get("mglc.model_id")) < 1:
-        raise UsageError("--model-id 必须是平台模型 ID（fullredraw 用 37）")
+    if int(conf.get("mglc.video_model_id")) < 1:
+        raise UsageError("--video-model-id 必须是平台模型 ID（fullredraw 用 37）")
     if not str(conf.get("mglc.mode")).strip():
         raise UsageError("--mode 不能为空（fullredraw 用 videoEdit）")
     # CLI/草稿只接受页面上的档位；config 里仍可保留 quarter/WxH 供内部调试。
@@ -111,6 +113,34 @@ def _apply_generation_params(conf, workdir, job, *, model_id, mode, resolution,
         raise UsageError(f"generation.toml: scale {saved.scale!r} 不合法")
     if int(conf.get("mglc.session_id", 0)) < 0:
         raise UsageError("--session-id 必须 >= 0（0 = 个人额度）")
+
+
+def _image_models_payload(conf, workdir, job) -> tuple[list[dict], str]:
+    """图片模型清单（mglc model list --type image，24h 缓存）。
+
+    取不到不炸整个 params show：视频侧字段照常返回，图片侧给空清单加
+    一句原因，页面据此在下拉框处显示提示。
+    """
+    from .platform.binpath import find_mglc
+    from .platform.client import Mglc
+    client = Mglc(config=conf, binary=find_mglc(conf) or "mglc")
+
+    def fetch() -> list[dict]:
+        data = client.model_list("image", page_size=100).data
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            raise VrgenError(f"mglc model list --type image 返回形状异常：{str(data)[:120]}")
+        return items
+
+    try:
+        entries = load_image_models(
+            jobs.job_dir(workdir, job), fetcher=fetch,
+            max_age_h=float(conf.get("mglc.models_max_age_h", 24.0)),
+            log=Log(quiet=True))
+        return [{"id": m.code, "name": m.name, "description": m.description}
+                for m in entries], ""
+    except Exception as exc:                    # mglc 缺席/未登录/网络失败都算
+        return [], f"图片模型清单暂时读不了：{exc}"
 
 
 def _parse_kv(items: list[str] | None) -> dict[str, str]:
@@ -161,7 +191,7 @@ def submit(
         None, "--template", help="模板 id；首次指定后记入 prompt-vars 草稿。"),
     sets: list[str] = typer.Option(None, "--set",
                                     help="提示词变量 k=v（自适应于草稿 [vars]）。"),
-    model_id: int = typer.Option(None, "--model-id",
+    video_model_id: int = typer.Option(None, "--video-model-id",
                                  help="← mglc --model-id；fullredraw 固定 37。"),
     mode: str = typer.Option(None, "--mode",
                              help="← mglc --type；fullredraw 固定 videoEdit。"),
@@ -189,7 +219,7 @@ def submit(
     try:
         conf = config_mod.load(config)
         _apply_generation_params(
-            conf, workdir, job, model_id=model_id, mode=mode,
+            conf, workdir, job, video_model_id=video_model_id, mode=mode,
             resolution=resolution, duration=duration, num=num,
             aspect_ratio=aspect_ratio, scale=scale, session_id=session_id,
         )
@@ -238,7 +268,7 @@ def submit(
     from .platform.binpath import find_mglc
     common = dict(
         prompt=prepared.run.prompt,
-        model_id=int(prepared.run.params["model_id"]),
+        model_id=int(prepared.run.params["video_model_id"]),
         mode=str(prepared.run.params["mode"]),
         duration_s=int(prepared.run.params["duration_s"]),
         resolution=str(prepared.run.params["resolution"]),
@@ -363,8 +393,9 @@ def image_submit(
         help="参考图用途，可重复；条数与 --image 相同，空字符串表示没有用途。"),
     step: str = typer.Option("", "--step",
                              help="首尾帧工作台步骤：first | last；只写台账，不发给平台。"),
-    model_id: int = typer.Option(None, "--model-id",
-                                 help="图片模型 ID；缺省取 config 的 image_model_id。"),
+    image_model_id: int = typer.Option(
+        None, "--image-model-id",
+        help="图片模型 ID；缺省取 generation.toml 的 image_model_id，再缺省取 config。"),
     ratio: str = typer.Option(None, "--ratio", help="输出比例；缺省取 config 的 image_ratio。"),
     resolution: str = typer.Option(
         None, "--resolution", help="1K | 2K | 4K；缺省取 config 的最高档。"),
@@ -408,8 +439,12 @@ def image_submit(
                     _parse_wh(canvas, "--canvas"), _parse_wh(source, "--source")))
             resolved_prompt = jobs.render_template(workdir, job, template,
                                                    vars_file=vars_file, extra=extra)
-        resolved_model = int(model_id if model_id is not None
-                             else conf.get("mglc.image_model_id", 44))
+        saved = jobs.load_generation_params(workdir, job)
+        resolved_model = int(
+            image_model_id if image_model_id is not None
+            else (saved.image_model_id
+                  if saved.image_model_id is not None
+                  else conf.get("mglc.image_model_id", 44)))
         resolved_ratio = str(ratio or conf.get("mglc.image_ratio", "16:9"))
         resolved_resolution = str(resolution or conf.get("mglc.image_resolution", "4K"))
         resolved_num = int(num if num is not None else conf.get("mglc.image_num", 4))
@@ -712,16 +747,21 @@ def params_show(
     try:
         conf = config_mod.load(config)
         _apply_generation_params(
-            conf, workdir, job, model_id=None, mode=None, resolution=None,
+            conf, workdir, job, video_model_id=None, mode=None, resolution=None,
             duration=None, num=None, aspect_ratio=aspect_ratio, scale=None,
         )
         models = load_models(jobs.job_dir(workdir, job),
                              url=str(conf.get("mglc.model_list_url")),
                              max_age_h=float(conf.get("mglc.models_max_age_h", 24.0)),
                              log=Log(quiet=True))
-        model = find_model(models, int(conf.get("mglc.model_id")))
+        model = find_model(models, int(conf.get("mglc.video_model_id")))
         limits = model.mode(str(conf.get("mglc.mode")))
         saved = jobs.load_generation_params(workdir, job)
+        image_model_id = int(
+            saved.image_model_id
+            if saved.image_model_id is not None
+            else conf.get("mglc.image_model_id", 44))
+        image_models, image_models_error = _image_models_payload(conf, workdir, job)
         aspect = params_mod.effective_aspect(str(conf.get("mglc.aspect_ratio")),
                                              limits.ratios)
         modes = [
@@ -742,6 +782,10 @@ def params_show(
         common = {
             "job": job,
             "modes": modes,
+            "models": dropdown_models(models),
+            "image_models": image_models,
+            **({"image_models_error": image_models_error}
+               if image_models_error else {}),
             "current": {
                 "resolution": str(conf.get("mglc.resolution")),
                 "scale": str(conf.get("mglc.scale")),
@@ -752,7 +796,8 @@ def params_show(
                 "episode": saved.episode or 0,
             },
             "fixed": {
-                "model_id": model.code,
+                "video_model_id": model.code,
+                "image_model_id": image_model_id,
                 "duration_s": int(conf.get("mglc.duration_s") or 0),
                 "num": int(conf.get("mglc.num", 1)),
             },
@@ -812,9 +857,12 @@ def params_show(
 @params_app.command("save")
 def params_save(
     job: str = typer.Option(..., "--job", help="job 名（调用方通常传 case 名）。"),
-    model_id: int = typer.Option(
-        None, "--model-id",
+    video_model_id: int = typer.Option(
+        None, "--video-model-id",
         help="视频模型 ID（22 = Seedance 2.0 的 4K 路线）；不传保留已有值。"),
+    image_model_id: int = typer.Option(
+        None, "--image-model-id",
+        help="图片模型 ID（首尾帧工作台与 360 静图用）；不传保留已有值。"),
     resolution: str = typer.Option(None, "--resolution",
                                    help="输出档位：480p | 720p | 1080p | 4K；省略保留已有值。"),
     scale: str = typer.Option(None, "--scale",
@@ -841,8 +889,10 @@ def params_save(
     try:
         if resolution is not None and resolution not in params_mod.OUTPUT_TIERS:
             raise UsageError("resolution 只能是 480p | 720p | 1080p | 4K")
-        if model_id is not None and model_id < 1:
-            raise UsageError("model-id 必须是正整数")
+        if video_model_id is not None and video_model_id < 1:
+            raise UsageError("video-model-id 必须是正整数")
+        if image_model_id is not None and image_model_id < 1:
+            raise UsageError("image-model-id 必须是正整数")
         if scale is not None and scale not in params_mod.INPUT_MODES:
             raise UsageError("scale 只能是 auto | full | half")
         if session_id is not None and session_id < 0:
@@ -851,7 +901,8 @@ def params_save(
             raise UsageError("project-id 必须 >= 0")
         if episode is not None and episode < 0:
             raise UsageError("episode 必须 >= 0")
-        if all(v is None for v in (model_id, resolution, scale, mode, aspect_ratio,
+        if all(v is None for v in (video_model_id, image_model_id, resolution,
+                                   scale, mode, aspect_ratio,
                                    session_id, project_id, episode)):
             raise UsageError("没有要保存的参数")
         saved = jobs.load_generation_params(workdir, job)
@@ -881,12 +932,16 @@ def params_save(
                 episode = saved.episode
             if episode and not project_id:
                 raise UsageError("给了 --episode 就必须给 --project-id")
-        effective_model = model_id if model_id is not None else saved.model_id
+        effective_video_model = (video_model_id if video_model_id is not None
+                                 else saved.video_model_id)
+        effective_image_model = (image_model_id if image_model_id is not None
+                                 else saved.image_model_id)
         effective_resolution = resolution if resolution is not None else saved.resolution
         effective_scale = scale if scale is not None else saved.scale
         jobs.save_generation_params(
             workdir, job,
-            jobs.GenerationParams(model_id=effective_model,
+            jobs.GenerationParams(video_model_id=effective_video_model,
+                                  image_model_id=effective_image_model,
                                   resolution=effective_resolution, scale=effective_scale,
                                   mode=mode, aspect_ratio=aspect_ratio,
                                   session_id=session_id or None,
@@ -894,7 +949,8 @@ def params_save(
                                   episode=episode or None))
     except VrgenError as exc:
         _fail(exc)
-    _echo_payload({"model_id": effective_model or 0,
+    _echo_payload({"video_model_id": effective_video_model or 0,
+                   "image_model_id": effective_image_model or 0,
                    "resolution": effective_resolution,
                    "scale": effective_scale,
                    "mode": mode, "aspect_ratio": aspect_ratio,

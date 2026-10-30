@@ -207,7 +207,7 @@ def submit(client: Mglc, run: Run, *, confirm: bool = False, timeout: float = 30
                    for item in refs if item.get("role") == "mask"]
     argv = build_generate_argv(
         prompt=run.prompt,
-        model_id=int(run.params["model_id"]),
+        model_id=int(run.params["video_model_id"]),
         mode=mode,
         duration_s=int(run.params["duration_s"]),
         resolution=str(run.params["resolution"]),

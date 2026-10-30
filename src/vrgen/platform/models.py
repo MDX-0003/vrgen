@@ -173,21 +173,34 @@ def parse_models(items: Iterable[Mapping[str, Any]]) -> list[ModelInfo]:
     return out
 
 
+def _capability(m: "ModelInfo") -> tuple[int, int]:
+    return (len(m.modes), sum(len(mode.resolutions) for mode in m.modes.values()))
+
+
 def find_model(models: Sequence[ModelInfo], code: int) -> ModelInfo:
     matches = [m for m in models if m.code == int(code)]
     if not matches:
         raise AigcError(
             f"model id {code} is not in the platform's model list "
             f"(have: {', '.join(str(m.code) for m in models)}).\n"
-            f"  set aigc.model_id in config/; code 37 is Seedance 2.5, the only model with "
+            f"  set mglc.video_model_id in config/; code 37 is Seedance 2.5, the only model with "
             f"the structurally locked `videoEdit` mode this tool needs"
         )
     # The platform lists some models twice: a cheaper "sample" entry and the full
     # one under the same code (37 is the current example; the sample entry only
     # advertises 480p). Pick the entry with the most capabilities so resolution
     # tiers and limits come from the full model, not the sample UI variant.
-    return max(matches, key=lambda m: (
-        len(m.modes), sum(len(mode.resolutions) for mode in m.modes.values())))
+    return max(matches, key=_capability)
+
+
+def dropdown_models(models: Sequence[ModelInfo]) -> list[dict]:
+    """全部视频模型按 code 去重后的下拉框清单（样片/完整两条取能力多的一条）。"""
+    best: dict[int, ModelInfo] = {}
+    for m in models:
+        if m.code not in best or _capability(m) > _capability(best[m.code]):
+            best[m.code] = m
+    return [{"id": m.code, "name": m.name, "description": m.description}
+            for m in sorted(best.values(), key=lambda m: m.code)]
 
 
 def fetch_items(url: str = MODEL_LIST_URL, timeout: float = 60.0) -> list[dict]:
@@ -250,3 +263,73 @@ def load_models(workdir: str | Path, *, refresh: bool = False,
     if log is not None:
         log.info(f"model list: {len(items)} entries from {url}")
     return parse_models(items)
+
+
+# ── 图片模型清单 ─────────────────────────────────────────────────────────
+# 视频清单在免鉴权的 videoModelList 上；图片模型没有对应的公开端点，只能经
+# `mglc model list --type image`（需要登录态）。缓存策略与视频侧相同：24h、
+# 失败时允许用陈旧缓存顶上。注意 modelId 只在类型内唯一（22 既是视频
+# Seedance 2.0 也是图片 Seedream 4.0），跨类型比较 id 没有意义。
+
+IMAGE_CACHE_NAME = "models_image.json"
+
+
+@dataclass(frozen=True)
+class ImageModel:
+    code: int
+    name: str
+    description: str
+
+
+def parse_image_models(items: Iterable[Mapping[str, Any]]) -> list[ImageModel]:
+    out: list[ImageModel] = []
+    for raw in items:
+        if not isinstance(raw, Mapping):
+            continue
+        if raw.get("type") not in (None, "image") or not raw.get("enabled", True):
+            continue
+        code = raw.get("modelId")
+        name = str(raw.get("displayName") or "").strip()
+        if isinstance(code, bool) or not isinstance(code, int) or code < 1 or not name:
+            continue
+        out.append(ImageModel(code=code, name=name,
+                              description=str(raw.get("description") or "")))
+    return out
+
+
+def load_image_models(workdir: str | Path, *,
+                      fetcher: Callable[[], list[dict]],
+                      refresh: bool = False, max_age_h: float = 24.0,
+                      log=None) -> list[ImageModel]:
+    """图片模型清单：fetcher 出原始 items（调用方负责构造 mglc 客户端）。"""
+    path = Path(workdir) / IMAGE_CACHE_NAME
+    cached: list[dict] | None = None
+    age_h = None
+    if path.is_file():
+        try:
+            blob = json.loads(path.read_text(encoding="utf-8"))
+            cached = blob.get("items")
+            age_h = (time.time() - float(blob.get("fetched_at", 0))) / 3600.0
+        except (json.JSONDecodeError, TypeError, ValueError, OSError):
+            cached = None
+
+    fresh = cached is not None and age_h is not None and age_h <= max_age_h
+    if fresh and not refresh:
+        return parse_image_models(cached or [])
+
+    try:
+        items = fetcher()
+    except Exception as exc:                    # mglc 缺席/未登录/网络失败都算
+        if cached:
+            if log is not None:
+                log.warn(f"image model list fetch failed ({exc}); using the cache "
+                         f"from {age_h:.1f}h ago")
+            return parse_image_models(cached)
+        raise
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"fetched_at": time.time(), "items": items},
+                               ensure_ascii=False), encoding="utf-8")
+    if log is not None:
+        log.info(f"image model list: {len(items)} entries")
+    return parse_image_models(items)

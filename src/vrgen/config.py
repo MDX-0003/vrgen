@@ -20,7 +20,7 @@ DEFAULTS_FILE = CONFIG_DIR / "default.toml"
 _FALLBACK: dict = {
     "schema": 1,
     "mglc": {
-        "model_id": 37,
+        "video_model_id": 37,
         "mode": "videoEdit",
         "resolution": "1080p",
         "duration_s": 0,
@@ -115,6 +115,14 @@ def builtin_defaults() -> dict:
     return _FALLBACK
 
 
+def _absorb_legacy_model_key(user: dict) -> dict:
+    """旧配置键 mglc.model_id → mglc.video_model_id（用户没写新键时）。"""
+    mglc = user.get("mglc")
+    if isinstance(mglc, dict) and "model_id" in mglc and "video_model_id" not in mglc:
+        mglc["video_model_id"] = mglc.pop("model_id")
+    return user
+
+
 def load(config_path: str | Path | None = None,
          overrides: list[str] = (),
          cwd: str | Path | None = None,
@@ -126,13 +134,15 @@ def load(config_path: str | Path | None = None,
     for candidate in (home / ".config" / "vrgen" / "default.toml", cwd / "vrgen.toml"):
         if candidate.is_file():
             with open(candidate, "rb") as fh:
-                data = _deep_merge(data, tomllib.load(fh), str(candidate))
+                user = _absorb_legacy_model_key(tomllib.load(fh))
+                data = _deep_merge(data, user, str(candidate))
     if config_path:
         path = Path(config_path)
         if not path.is_file():
             raise ConfigError(f"config file not found: {path}")
         with open(path, "rb") as fh:
-            data = _deep_merge(data, tomllib.load(fh), str(path))
+            user = _absorb_legacy_model_key(tomllib.load(fh))
+            data = _deep_merge(data, user, str(path))
     else:
         path = None
 
@@ -148,8 +158,8 @@ def _validate(data: dict) -> None:
     if int(data.get("schema", 0)) != 1:
         raise ConfigError(f"unsupported config schema {data.get('schema')!r} (expected 1)")
     mglc = data["mglc"]
-    if int(mglc["model_id"]) < 1:
-        raise ConfigError("mglc.model_id must be >= 1 (it is a platform model code)")
+    if int(mglc["video_model_id"]) < 1:
+        raise ConfigError("mglc.video_model_id must be >= 1 (it is a platform model code)")
     if not str(mglc["mode"]).strip():
         raise ConfigError("mglc.mode must not be empty (e.g. videoEdit)")
     if str(mglc["resolution"]) not in ("480p", "720p", "1080p", "4K"):

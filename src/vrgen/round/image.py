@@ -30,8 +30,8 @@ IMAGE_TIERS = ("1K", "2K", "4K")
 
 #: 图片步参考图的职责说明；模板里的 ``{image_roles}`` 由它按上传顺序展开。
 IMAGE_ROLE_TEXT = {
-    "first_frame_raw": "首帧原始图（场景、机位与占位位置底图）",
-    "last_frame_raw": "尾帧原始图（场景、机位与占位位置底图）",
+    "first_frame_raw": "首帧原始图（底图：场景、机位与对象位置）",
+    "last_frame_raw": "尾帧原始图（底图：场景、机位与对象位置）",
     "subject_ref": "人物三视图（唯一外观依据）",
     "first_frame": "首帧定稿图（同一人物的身份锚点）",
     "last_frame": "尾帧定稿图（同一人物的身份锚点）",
@@ -132,7 +132,7 @@ def prepare_image_round(conf, pkg: ImagePackage, *, log) -> ImagePrepared:
     params: dict[str, Any] = {
         "backend": "mglc",
         "kind": "image",
-        "model_id": int(pkg.model_id),
+        "image_model_id": int(pkg.model_id),
         "ratio": str(pkg.ratio),
         "resolution": str(pkg.resolution),
         "num": int(pkg.num),

@@ -920,13 +920,21 @@ def test_call_log_appends_every_attempt(tmp_path):
 
 def test_mglc_defaults_are_pinned_to_the_locked_edit_path():
     conf = config_mod.load()
-    assert conf.get("mglc.model_id") == 37
+    assert conf.get("mglc.video_model_id") == 37
     assert conf.get("mglc.mode") == "videoEdit"
     assert conf.get("mglc.aspect_ratio") == "21:9"
 
 
+def test_mglc_config_absorbs_legacy_model_key(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "vrgen.toml").write_text("[mglc]\nmodel_id = 22\n",
+                                         encoding="utf-8")
+    conf = config_mod.load()
+    assert conf.get("mglc.video_model_id") == 22
+
+
 @pytest.mark.parametrize("key,value", [
-    ("mglc.model_id", "0"),
+    ("mglc.video_model_id", "0"),
     ("mglc.resolution", '"9000p"'),
     ("mglc.num", "5"),
     ("mglc.scale", '"4201x1800"'),
@@ -1012,7 +1020,7 @@ def test_cli_submit_explicit_params_override_config(tmp_path, monkeypatch):
         "--canvas", "4668x2000", "--source", "4000x2000",
         "--template", "t", "--dry-run", "--workdir", str(runs),
         "--config", str(cfg),
-        "--model-id", "37", "--mode", "videoEdit", "--resolution", "720p",
+        "--video-model-id", "37", "--mode", "videoEdit", "--resolution", "720p",
         "--duration", "9", "--num", "1", "--aspect-ratio", "21:9",
         "--scale", "half"])
     assert result.exit_code == 0, result.output
@@ -1020,7 +1028,7 @@ def test_cli_submit_explicit_params_override_config(tmp_path, monkeypatch):
     assert run.params["resolution"] == "720p"
     assert run.params["scale"] == "2334x1000"
     assert run.params["duration_s"] == 9
-    assert run.params["model_id"] == 37
+    assert run.params["video_model_id"] == 37
     assert run.params["mode"] == "videoEdit"
     assert run.params["aspect_ratio"] == "21:9"
 

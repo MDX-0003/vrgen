@@ -7,7 +7,7 @@ schema = 1
 # --- 模型与请求 ---
 # Seedance 2.5：唯一提供 videoEdit（结构锁定式编辑）的型号。
 # 22=2.0 / 23=2.0 Fast 只接受语义参考；14=1.5 Pro 不接受输入视频。
-model_id         = 37
+video_model_id   = 37
 mode             = "videoEdit"
 resolution       = "1080p"   # 480p | 720p | 1080p（2.5 最高 1080p）
 duration_s       = 0        # 0 = 按输入帧数/fps 向上取整到整数秒（平台要求 >= 4）

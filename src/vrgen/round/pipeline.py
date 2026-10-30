@@ -164,7 +164,7 @@ def _prepare_refs(conf, pkg: InputPackage, *, log) -> Prepared:
     """单一本地半场：校验 → 各自缩放 → 母版几何 → 提示词 → 台账。"""
     models = load_models(pkg.workdir, url=str(conf.get("mglc.model_list_url")),
                          max_age_h=float(conf.get("mglc.models_max_age_h", 24.0)), log=log)
-    model = find_model(models, int(conf.get("mglc.model_id")))
+    model = find_model(models, int(conf.get("mglc.video_model_id")))
     limits = model.mode(str(conf.get("mglc.mode")))
     resolution = str(conf.get("mglc.resolution"))
     if limits.resolutions and resolution not in limits.resolutions:
@@ -299,7 +299,7 @@ def _prepare_refs(conf, pkg: InputPackage, *, log) -> Prepared:
         })
     params = {
         "backend": "mglc",
-        "model_id": model.code,
+        "video_model_id": model.code,
         "mode": limits.mode,
         "resolution": str(conf.get("mglc.resolution")),
         "duration_s": duration_s,

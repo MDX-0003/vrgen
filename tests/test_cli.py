@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -223,6 +224,8 @@ class _Limits:
 
 class _Model:
     code = 37
+    name = "Seedance 2.5"
+    description = ""
     modes = {"videoEdit": _Limits()}
 
     def mode(self, name):
@@ -238,6 +241,10 @@ def _params_offline(tmp_path, monkeypatch):
     ]}, ensure_ascii=False), encoding="utf-8")
     monkeypatch.setattr(vrgen_cli, "load_models", lambda *a, **kw: [_Model()])
     monkeypatch.setattr(vrgen_cli, "find_model", lambda models, code: _Model())
+    monkeypatch.setattr(
+        vrgen_cli, "_image_models_payload",
+        lambda conf, workdir, job: (
+            [{"id": 44, "name": "专业图片-2.5", "description": ""}], ""))
     monkeypatch.setattr(vrgen_cli, "probe_input", lambda path, conf: InputSpec(
         width=4668, height=2000, fps=30.0, duration_s=7.979,
         size_bytes=228_200_000, container=("mp4",)))
@@ -274,6 +281,8 @@ class _FirstLastLimits:
 
 class _FirstLastModel:
     code = 37
+    name = "Seedance 2.5"
+    description = ""
     modes = {"videoEdit": _Limits(), "firstLastFrame": _FirstLastLimits()}
 
     def mode(self, name):
@@ -351,7 +360,8 @@ def test_params_show_reports_both_resolution_kinds(tmp_path, monkeypatch):
     assert data["current"] == {"resolution": "1080p", "scale": "auto",
                                "mode": "videoEdit", "aspect_ratio": "21:9",
                                "session_id": 0, "project_id": 0, "episode": 0}
-    assert data["fixed"] == {"model_id": 37, "duration_s": 8, "num": 1}
+    assert data["fixed"] == {"video_model_id": 37, "image_model_id": 44,
+                             "duration_s": 8, "num": 1}
     assert data["modes"][0]["value"] == "videoEdit"
     assert data["modes"][0]["ratios"] == []
     assert data["fixed"]["duration_s"] == 8
@@ -383,6 +393,7 @@ class _AllMedia4KLimits:
 class _AllMedia4KModel:
     code = 22
     name = "Seedance 2.0"
+    description = ""
     modes = {"allMediaRef": _AllMedia4KLimits()}
 
     def mode(self, name):
@@ -397,7 +408,7 @@ def _four_k_show(tmp_path, monkeypatch, aspect: str) -> dict:
         vrgen_cli, "find_model",
         lambda models, code: _AllMedia4KModel() if int(code) == 22 else _Model())
     jobs.save_generation_params(
-        tmp_path, "j1", jobs.GenerationParams(model_id=22, mode="allMediaRef"))
+        tmp_path, "j1", jobs.GenerationParams(video_model_id=22, mode="allMediaRef"))
     r = runner.invoke(app, ["params", "show", "--job", "j1",
                             "--refs", str(refs),
                             "--canvas", "1920x1080",
@@ -411,7 +422,7 @@ def _four_k_show(tmp_path, monkeypatch, aspect: str) -> dict:
 def test_params_show_offers_4k_when_the_model_publishes_it(tmp_path, monkeypatch):
     data = _four_k_show(tmp_path, monkeypatch, "16:9")
     assert {"value": "4K", "width": 3840, "height": 2160} in data["output"]
-    assert data["fixed"]["model_id"] == 22
+    assert data["fixed"]["video_model_id"] == 22
 
 
 def test_params_show_skips_4k_for_21_9_without_a_nominal(tmp_path, monkeypatch):
@@ -435,12 +446,12 @@ def test_params_save_model_id_switches_the_capability_view(tmp_path, monkeypatch
         vrgen_cli, "find_model",
         lambda models, code: _AllMedia4KModel() if int(code) == 22 else _Model())
     r = runner.invoke(app, ["params", "save", "--job", "j1",
-                            "--model-id", "22", "--mode", "allMediaRef",
+                            "--video-model-id", "22", "--mode", "allMediaRef",
                             "--resolution", "4K", "--aspect-ratio", "16:9",
                             "--workdir", str(tmp_path)])
     assert r.exit_code == 0, r.output
-    assert json.loads(r.output)["model_id"] == 22
-    assert 'model_id = 22' in jobs.generation_params_path(
+    assert json.loads(r.output)["video_model_id"] == 22
+    assert 'video_model_id = 22' in jobs.generation_params_path(
         tmp_path, "j1").read_text(encoding="utf-8")
 
     r = runner.invoke(app, ["params", "show", "--job", "j1", "--refs", str(refs),
@@ -448,7 +459,7 @@ def test_params_save_model_id_switches_the_capability_view(tmp_path, monkeypatch
                             "--workdir", str(tmp_path)])
     assert r.exit_code == 0, r.output
     data = json.loads(r.output)
-    assert data["fixed"]["model_id"] == 22
+    assert data["fixed"]["video_model_id"] == 22
     assert data["current"]["mode"] == "allMediaRef"
     assert data["current"]["aspect_ratio"] == "16:9"
     assert {"value": "4K", "width": 3840, "height": 2160} in data["output"]
@@ -461,7 +472,7 @@ def test_params_save_roundtrips_through_show(tmp_path, monkeypatch):
                             "--resolution", "720p", "--scale", "half",
                             "--workdir", wd])
     assert r.exit_code == 0, r.output
-    assert json.loads(r.output) == {"model_id": 0,
+    assert json.loads(r.output) == {"video_model_id": 0, "image_model_id": 0,
                                     "resolution": "720p", "scale": "half",
                                     "mode": None, "aspect_ratio": None,
                                     "session_id": 0, "project_id": 0, "episode": 0}
@@ -475,6 +486,95 @@ def test_params_save_roundtrips_through_show(tmp_path, monkeypatch):
     assert data["current"]["scale"] == "half"
     assert data["current"]["mode"] == "videoEdit"
     assert data["saved"] is True
+
+
+def test_params_save_writes_both_model_keys(tmp_path):
+    wd = str(tmp_path)
+    r = runner.invoke(app, ["params", "save", "--job", "j1",
+                            "--video-model-id", "22", "--image-model-id", "25",
+                            "--workdir", wd])
+    assert r.exit_code == 0, r.output
+    echo = json.loads(r.output)
+    assert echo["video_model_id"] == 22 and echo["image_model_id"] == 25
+    text = jobs.generation_params_path(tmp_path, "j1").read_text(encoding="utf-8")
+    assert "video_model_id = 22" in text and "image_model_id = 25" in text
+
+
+def test_params_show_reads_legacy_model_key_as_video(tmp_path, monkeypatch):
+    refs = _params_offline(tmp_path, monkeypatch)
+    monkeypatch.setattr(vrgen_cli, "load_models",
+                        lambda *a, **kw: [_Model(), _AllMedia4KModel()])
+    monkeypatch.setattr(
+        vrgen_cli, "find_model",
+        lambda models, code: _AllMedia4KModel() if int(code) == 22 else _Model())
+    legacy = jobs.generation_params_path(tmp_path, "j1")
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text('model_id = 22\nmode = "allMediaRef"\n', encoding="utf-8")
+
+    r = runner.invoke(app, ["params", "show", "--job", "j1", "--refs", str(refs),
+                            "--canvas", "1920x1080", "--source", "1920x1080",
+                            "--workdir", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["fixed"]["video_model_id"] == 22
+
+
+def test_params_show_lists_models_for_the_dropdown(tmp_path, monkeypatch):
+    _params_offline(tmp_path, monkeypatch)
+    # 平台会把同一 code 列成样片/完整两条；下拉清单按 code 去重。
+    monkeypatch.setattr(vrgen_cli, "load_models",
+                        lambda *a, **kw: [_Model(), _Model(), _AllMedia4KModel()])
+
+    r = runner.invoke(app, ["params", "show", "--job", "j1",
+                            "--workdir", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    data = json.loads(r.output)
+    assert data["models"] == [
+        {"id": 22, "name": "Seedance 2.0", "description": ""},
+        {"id": 37, "name": "Seedance 2.5", "description": ""}]
+    assert data["image_models"] == [
+        {"id": 44, "name": "专业图片-2.5", "description": ""}]
+
+
+class _FakeImageClient:
+    def __init__(self, *, data=None, error=None):
+        self._data, self._error = data, error
+
+    def model_list(self, model_type, **extra):
+        if self._error:
+            raise self._error
+        return SimpleNamespace(data=self._data)
+
+
+def test_image_models_payload_fetches_and_degrades(tmp_path, monkeypatch):
+    import vrgen.platform.binpath as binpath
+    import vrgen.platform.client as client_mod
+    from vrgen import config as config_mod
+
+    conf = config_mod.load()
+    stale_conf = config_mod.load(overrides=["mglc.models_max_age_h=0"])
+    monkeypatch.setattr(binpath, "find_mglc", lambda conf: "mglc-fake")
+    items = [{"modelId": 44, "displayName": "专业图片-2.5",
+              "description": "d", "enabled": True, "type": "image"},
+             {"modelId": 99, "displayName": "禁用款",
+              "enabled": False, "type": "image"}]
+    monkeypatch.setattr(client_mod, "Mglc",
+                        lambda **kw: _FakeImageClient(data={"items": items}))
+
+    entries, error = vrgen_cli._image_models_payload(conf, tmp_path, "j1")
+    assert error == ""
+    assert entries == [{"id": 44, "name": "专业图片-2.5", "description": "d"}]
+    assert (tmp_path / "j1" / "models_image.json").is_file()
+
+    # 缓存过期 + mglc 失败 → 陈旧缓存顶上，不报错
+    monkeypatch.setattr(client_mod, "Mglc",
+                        lambda **kw: _FakeImageClient(error=RuntimeError("未登录")))
+    entries, error = vrgen_cli._image_models_payload(stale_conf, tmp_path, "j1")
+    assert error == "" and entries[0]["id"] == 44
+
+    # mglc 失败且没有缓存 → 空清单 + 原因
+    fresh = tmp_path / "empty"
+    entries, error = vrgen_cli._image_models_payload(stale_conf, fresh, "j1")
+    assert entries == [] and "未登录" in error
 
 
 def test_params_save_persists_project_and_episode_for_the_ui(tmp_path, monkeypatch):

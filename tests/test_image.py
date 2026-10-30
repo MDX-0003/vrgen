@@ -180,13 +180,43 @@ def test_image_submit_dry_run(tmp_path):
     assert "no external calls" in (run.dir / "mglc.log").read_text(encoding="utf-8")
 
 
+def test_image_submit_model_prefers_flag_then_draft_then_config(tmp_path):
+    images = _images(tmp_path)
+    root = tmp_path / "runs"
+    jobs.save_generation_params(root, "j", jobs.GenerationParams(image_model_id=25))
+
+    def submitted_models(job: str) -> list[int]:
+        return [run.params["image_model_id"]
+                for run in RunStore(root / job).all()]
+
+    common = ["--prompt", "p", "--image", str(images[0]), "--image", str(images[1]),
+              "--workdir", str(root), "--dry-run"]
+    result = runner.invoke(vrgen_cli.app, ["image", "submit", "--job", "j", *common])
+    assert result.exit_code == 0, result.output
+    assert submitted_models("j") == [25]
+
+    result = runner.invoke(vrgen_cli.app, ["image", "submit", "--job", "j",
+                                           "--image-model-id", "33", *common])
+    assert result.exit_code == 0, result.output
+    assert sorted(submitted_models("j")) == [25, 33]
+
+    result = runner.invoke(vrgen_cli.app, ["image", "submit", "--job", "j2", *common])
+    assert result.exit_code == 0, result.output
+    assert submitted_models("j2") == [44]
+
+
 def _seed_keyframe_vars(root: Path, step: str = "first") -> None:
     jobs.edit_prompt_vars(
         root, "j",
-        sets={"figure": "老年文官，黑冠红袍",
+        sets={"target": "人物",
+              "source_first": "底图是占位人形：只取位置与大小，不继承站姿",
+              "source_last": "底图是占位人形：只取位置与大小，不继承站姿",
+              "figure": "老年文官，黑冠红袍",
+              "subject_last": "同一位老年文官，外观同首帧定稿",
               "pose_first": "坐在矮案后，面向画面右侧",
               "pose_last": "站在红毯中央，双手垂在身前",
-              "preserve": "机位、场景与光照保持图1原样"},
+              "preserve": "机位、场景与光照保持图1原样",
+              "cleanup": ""},
         template=f"keyframe-{step}", vars_file="keyframe-vars.toml")
 
 
@@ -241,7 +271,7 @@ def test_image_roles_text_includes_notes():
     text = image_mod.image_roles_text(
         ["first_frame_raw", "subject_ref", "detail_ref"],
         ["", "", "头冠纹样与金色饰物。"])
-    assert "图1 = 首帧原始图（场景、机位与占位位置底图）。" in text
+    assert "图1 = 首帧原始图（底图：场景、机位与对象位置）。" in text
     assert "图2 = 人物三视图（唯一外观依据）。" in text
     assert ("图3 = 细节参考图（只继承所指细节的外观，不取构图、背景与姿态）"
             "：头冠纹样与金色饰物。") in text
@@ -451,9 +481,26 @@ def test_keyframe_vars_file_isolated(tmp_path):
 def test_keyframe_templates_share_shared_aliases():
     first = (templates_dir() / "keyframe-first.md").read_text(encoding="utf-8")
     last = (templates_dir() / "keyframe-last.md").read_text(encoding="utf-8")
-    for key in ("figure", "preserve"):
+    for key in ("target", "preserve", "cleanup"):
         assert template_aliases(first)[key] == template_aliases(last)[key]
         assert template_help(first)[key] == template_help(last)[key]
+
+
+def test_keyframe_templates_have_no_case_specific_residue():
+    """旧案例的占位人形与界面清理不能再写死在正文里（2026-10-30 决策 50）。"""
+    for name in ("keyframe-first.md", "keyframe-last.md"):
+        text = (templates_dir() / name).read_text(encoding="utf-8")
+        for phrase in ("白色占位人形", "不继承", "【界面清理】"):
+            assert phrase not in text, (name, phrase)
+        assert "{target|" in text
+        assert "{cleanup|" in text
+
+
+def test_keyframe_last_uses_its_own_subject_slot():
+    """尾帧可能是空场，外观不能沿用首帧模板的 figure 槽位。"""
+    text = (templates_dir() / "keyframe-last.md").read_text(encoding="utf-8")
+    assert "{subject_last|" in text
+    assert "{figure|" not in text
 
 
 def test_result_index_copies_nth_candidate(tmp_path):
