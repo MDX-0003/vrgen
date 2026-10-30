@@ -249,8 +249,66 @@ def test_image_roles_text_includes_notes():
 
 def test_image_roles_text_covers_still_roles():
     text = image_mod.image_roles_text(["edit_master", "mask"])
-    assert "图1 = 待重绘的 360 视口底图（本轮唯一要修改的底图）。" in text
+    assert "图1 = 待重绘的 360 底图（本轮唯一要修改的底图）。" in text
     assert "图2 = 掩码图（黑色区域需要重绘，白色区域保持原样）。" in text
+
+
+def test_image_roles_text_covers_lighting_ref():
+    text = image_mod.image_roles_text(["edit_master", "mask", "lighting_ref"])
+    assert "图3 = 氛围与光影参考图" in text
+    assert "不取构图" in text
+    assert "图3 = lighting_ref。" not in text
+
+
+def test_full_redraw_img_template_renders(tmp_path):
+    images = _images(tmp_path)
+    root = tmp_path / "runs"
+    jobs.edit_prompt_vars(
+        root, "j",
+        sets={"edit": "把整座宫殿改成烛火通明、暖色高光的夜宴氛围",
+              "preserve": "梁柱结构、陈设位置与构图不动"},
+        template="fullRedrawImg", vars_file="still-vars.toml")
+    result = runner.invoke(vrgen_cli.app, [
+        "image", "submit", "--job", "j",
+        "--template", "fullRedrawImg", "--vars-file", "still-vars.toml",
+        "--image-role", "edit_master", "--image-role", "mask",
+        "--image-role", "lighting_ref",
+        "--image", str(images[0]), "--image", str(images[1]),
+        "--image", str(images[0]),
+        "--canvas", "9558x4096", "--source", "8192x4096",
+        "--workdir", str(root), "--dry-run"])
+    assert result.exit_code == 0, result.output
+    run = RunStore(root / "j").all()[0]
+    prompt = run.prompt_path.read_text(encoding="utf-8")
+    assert "整幅 360 全景重绘" in prompt
+    assert "图1 = 待重绘的 360 底图" in prompt
+    assert "图2 = 掩码图" in prompt
+    assert "图3 = 氛围与光影参考图" in prompt
+    assert "夜宴氛围" in prompt
+    assert "两份拷贝" in prompt
+    assert "白色区域" in prompt
+    # 冗余带列号按 --canvas/--source 算出：带 683 px，主内容 8192 px。
+    assert "画布宽 9558 像素" in prompt
+    assert "最左侧 683 像素（第 0–682 列）" in prompt
+    assert "最右侧 683 像素（第 8875–9557 列）" in prompt
+    assert "中间 8192 像素（第 683–8874 列）" in prompt
+    assert "{" not in prompt and "|" not in prompt
+
+
+def test_image_submit_requires_canvas_and_source_together(tmp_path):
+    images = _images(tmp_path)
+    root = tmp_path / "runs"
+    jobs.edit_prompt_vars(
+        root, "j", sets={"edit": "x", "preserve": "y"},
+        template="fullRedrawImg", vars_file="still-vars.toml")
+    result = runner.invoke(vrgen_cli.app, [
+        "image", "submit", "--job", "j",
+        "--template", "fullRedrawImg", "--vars-file", "still-vars.toml",
+        "--image", str(images[0]), "--image-role", "edit_master",
+        "--canvas", "9558x4096",
+        "--workdir", str(root), "--dry-run"])
+    assert result.exit_code != 0
+    assert "--canvas 与 --source 必须成对给出" in result.output
 
 
 def test_still360_local_template_renders(tmp_path):
@@ -270,7 +328,7 @@ def test_still360_local_template_renders(tmp_path):
     assert result.exit_code == 0, result.output
     run = RunStore(root / "j").all()[0]
     prompt = run.prompt_path.read_text(encoding="utf-8")
-    assert "图1 = 待重绘的 360 视口底图" in prompt
+    assert "图1 = 待重绘的 360 底图" in prompt
     assert "图2 = 掩码图" in prompt
     assert "长袍文官" in prompt
     assert "{" not in prompt and "|" not in prompt

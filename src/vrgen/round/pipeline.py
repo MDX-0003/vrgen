@@ -166,6 +166,11 @@ def _prepare_refs(conf, pkg: InputPackage, *, log) -> Prepared:
                          max_age_h=float(conf.get("mglc.models_max_age_h", 24.0)), log=log)
     model = find_model(models, int(conf.get("mglc.model_id")))
     limits = model.mode(str(conf.get("mglc.mode")))
+    resolution = str(conf.get("mglc.resolution"))
+    if limits.resolutions and resolution not in limits.resolutions:
+        raise UsageError(
+            f"model {model.code} ({model.name}) 的 mode {limits.mode} 只支持这些"
+            f"输出档：{' / '.join(limits.resolutions)}；当前是 {resolution!r}")
     refs_mod.validate_mode(pkg.refs, limits.mode)
     refs_mod.validate_counts(pkg.refs, limits.mode,
                              max_videos=limits.max_videos,

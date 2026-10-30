@@ -88,9 +88,9 @@ def _apply_generation_params(conf, workdir, job, *, model_id, mode, resolution,
         raise UsageError("--model-id 必须是平台模型 ID（fullredraw 用 37）")
     if not str(conf.get("mglc.mode")).strip():
         raise UsageError("--mode 不能为空（fullredraw 用 videoEdit）")
-    # CLI/草稿只接受页面上的三档；config 里仍可保留 quarter/WxH 供内部调试。
+    # CLI/草稿只接受页面上的档位；config 里仍可保留 quarter/WxH 供内部调试。
     if resolution is not None and resolution not in params_mod.OUTPUT_TIERS:
-        raise UsageError("--resolution 只能是 480p | 720p | 1080p")
+        raise UsageError("--resolution 只能是 480p | 720p | 1080p | 4K")
     if saved.resolution is not None and saved.resolution not in params_mod.OUTPUT_TIERS:
         raise UsageError(f"generation.toml: resolution {saved.resolution!r} 不合法")
     duration_s = int(conf.get("mglc.duration_s"))
@@ -166,7 +166,7 @@ def submit(
     mode: str = typer.Option(None, "--mode",
                              help="← mglc --type；fullredraw 固定 videoEdit。"),
     resolution: str = typer.Option(None, "--resolution",
-                                    help="← mglc --resolution；输出档位 480p|720p|1080p。"),
+                                    help="← mglc --resolution；输出档位 480p|720p|1080p|4K。"),
     duration: int = typer.Option(None, "--duration",
                                  help="← mglc --duration；整数秒，默认按输入时长取整。"),
     num: int = typer.Option(None, "--num",
@@ -371,6 +371,12 @@ def image_submit(
     num: int = typer.Option(None, "--num", help="候选数量 1..4；缺省取 config。"),
     session_id: int = typer.Option(
         None, "--session-id", help="项目生成会话 ID；0 = 个人额度。"),
+    canvas: str = typer.Option(
+        None, "--canvas", metavar="WxH",
+        help="画布尺寸（360 静图用）：按 21:9 画布与源宽推出冗余带列号占位符。"),
+    source: str = typer.Option(
+        None, "--source", metavar="WxH",
+        help="源图尺寸（360 静图用）：与 --canvas 一起给，缺一不可。"),
     dry_run: bool = typer.Option(False, "--dry-run", help="只建台账并打印 argv，不发请求。"),
     workdir: Path = typer.Option(None, "--workdir", help="台账根（默认 $VRGEN_RUNS_DIR）。"),
     config: Path = typer.Option(None, "--config", help="TOML 配置文件。"),
@@ -395,6 +401,11 @@ def image_submit(
         resolved_prompt = prompt
         if template:
             extra = {"image_roles": image_mod.image_roles_text(roles, notes)}
+            if bool(canvas) != bool(source):
+                raise UsageError("--canvas 与 --source 必须成对给出")
+            if canvas:
+                extra.update(prompt_mod.geometry_from_sizes(
+                    _parse_wh(canvas, "--canvas"), _parse_wh(source, "--source")))
             resolved_prompt = jobs.render_template(workdir, job, template,
                                                    vars_file=vars_file, extra=extra)
         resolved_model = int(model_id if model_id is not None
@@ -802,7 +813,7 @@ def params_show(
 def params_save(
     job: str = typer.Option(..., "--job", help="job 名（调用方通常传 case 名）。"),
     resolution: str = typer.Option(None, "--resolution",
-                                   help="输出档位：480p | 720p | 1080p；省略保留已有值。"),
+                                   help="输出档位：480p | 720p | 1080p | 4K；省略保留已有值。"),
     scale: str = typer.Option(None, "--scale",
                               help="输入缩放：auto | full | half；省略保留已有值。"),
     mode: str = typer.Option(
@@ -826,7 +837,7 @@ def params_save(
     """
     try:
         if resolution is not None and resolution not in params_mod.OUTPUT_TIERS:
-            raise UsageError("resolution 只能是 480p | 720p | 1080p")
+            raise UsageError("resolution 只能是 480p | 720p | 1080p | 4K")
         if scale is not None and scale not in params_mod.INPUT_MODES:
             raise UsageError("scale 只能是 auto | full | half")
         if session_id is not None and session_id < 0:

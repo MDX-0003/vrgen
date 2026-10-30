@@ -87,7 +87,6 @@ def strip_aliases(template_text: str) -> str:
 def geometry_variables(geom: UploadGeometry) -> dict[str, object]:
     """The placeholder values that describe the upload raster."""
     w, h = geom.canvas_size
-    left, main, right = geom.region_left, geom.region_main, geom.region_right
     return {
         "canvas_w": w,
         "canvas_h": h,
@@ -95,10 +94,26 @@ def geometry_variables(geom: UploadGeometry) -> dict[str, object]:
         "upload_h": h,
         "source_w": geom.source_size[0],
         "source_h": geom.source_size[1],
-        "band_w": geom.band_w,
         "band_half": geom.P,
-        "band_pct": f"{100 * geom.band_w / w:.1f}",
-        "band_last_left": geom.band_w - 1,
+        "scale_pct": f"{100 * geom.scale:.1f}",
+        **column_variables(geom.canvas_size, geom.band_w),
+    }
+
+
+def column_variables(canvas_size: tuple[int, int],
+                     band_w: int) -> dict[str, object]:
+    """列区间占位符：冗余带宽度与三段列号，只依赖画布宽度与带宽。
+
+    视频（pad 产物有精确的源宽）与静图（上传副本尺寸由装配器缩到平台限额内，
+    以模型侧画布为准）共用这一套。
+    """
+    w, h = int(canvas_size[0]), int(canvas_size[1])
+    band = max(0, min(int(band_w), w // 2))
+    left, main, right = (0, band), (band, w - band), (w - band, w)
+    return {
+        "band_w": band,
+        "band_pct": f"{100 * band / w:.1f}",
+        "band_last_left": band - 1,
         "left_first": left[0],
         "left_last": left[1] - 1,
         "main_first": main[0],
@@ -106,7 +121,6 @@ def geometry_variables(geom: UploadGeometry) -> dict[str, object]:
         "main_w": main[1] - main[0],
         "right_first": right[0],
         "right_last": right[1] - 1,
-        "scale_pct": f"{100 * geom.scale:.1f}",
     }
 
 

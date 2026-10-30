@@ -22,7 +22,7 @@ def test_registry_declares_both_kinds():
     assert image.needs_virtual_ip is False
     assert video.multi_result is False
     assert image.multi_result is True
-    assert video.resolution_tiers == ("480p", "720p", "1080p")
+    assert video.resolution_tiers == ("480p", "720p", "1080p", "4K")
     assert image.resolution_tiers == IMAGE_TIERS
     for kind in KINDS.values():
         assert callable(kind.build_argv)

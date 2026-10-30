@@ -358,6 +358,74 @@ def test_params_show_reports_both_resolution_kinds(tmp_path, monkeypatch):
     assert data["saved"] is False
 
 
+class _AllMedia4KLimits:
+    mode = "allMediaRef"
+    takes_video = True
+    resolutions = ("480p", "720p", "1080p", "4K")
+    ratios = ("auto", "1:1", "16:9", "21:9")
+    max_count = 15
+    duration = {"type": "range", "min": 4, "max": 15}
+
+    def ref_video_limits(self):
+        return {"minPixel": 409_600, "maxPixel": 2_086_668,
+                "maxBytes": 209_715_200,
+                "fps": {"min": 24, "max": 60},
+                "duration": {"min": 2, "max": 15},
+                "formats": ["mp4"],
+                "refVideoMinAspectRatio": 0.4,
+                "refVideoMaxAspectRatio": 2.5,
+                "maxCount": 3}
+
+    def ref_image_limits(self):
+        return {"maxBytes": 0, "maxCount": 9}
+
+
+class _AllMedia4KModel:
+    code = 22
+    name = "Seedance 2.0"
+    modes = {"allMediaRef": _AllMedia4KLimits()}
+
+    def mode(self, name):
+        return self.modes[name]
+
+
+def _four_k_show(tmp_path, monkeypatch, aspect: str) -> dict:
+    refs = _params_offline(tmp_path, monkeypatch)
+    monkeypatch.setattr(vrgen_cli, "load_models",
+                        lambda *a, **kw: [_AllMedia4KModel()])
+    monkeypatch.setattr(vrgen_cli, "find_model",
+                        lambda models, code: _AllMedia4KModel())
+    jobs.save_generation_params(
+        tmp_path, "j1", jobs.GenerationParams(mode="allMediaRef"))
+    r = runner.invoke(app, ["params", "show", "--job", "j1",
+                            "--refs", str(refs),
+                            "--canvas", "1920x1080",
+                            "--source", "1920x1080",
+                            "--aspect-ratio", aspect,
+                            "--workdir", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    return json.loads(r.output)
+
+
+def test_params_show_offers_4k_when_the_model_publishes_it(tmp_path, monkeypatch):
+    data = _four_k_show(tmp_path, monkeypatch, "16:9")
+    assert {"value": "4K", "width": 3840, "height": 2160} in data["output"]
+    assert data["fixed"]["model_id"] == 22
+
+
+def test_params_show_skips_4k_for_21_9_without_a_nominal(tmp_path, monkeypatch):
+    data = _four_k_show(tmp_path, monkeypatch, "21:9")
+    assert all(item["value"] != "4K" for item in data["output"])
+
+
+def test_output_options_4k_is_16_9_only():
+    from vrgen.prep import params as params_mod
+    assert params_mod.output_options(16 / 9)[-1] == {
+        "value": "4K", "width": 3840, "height": 2160}
+    assert all(item["value"] != "4K"
+               for item in params_mod.output_options(21 / 9))
+
+
 def test_params_save_roundtrips_through_show(tmp_path, monkeypatch):
     refs = _params_offline(tmp_path, monkeypatch)
     wd = str(tmp_path)
@@ -485,7 +553,7 @@ def test_params_save_persists_mode_and_aspect(tmp_path, monkeypatch):
 
 
 def test_params_save_rejects_values_outside_the_ui_set(tmp_path):
-    for args in (["--resolution", "4K", "--scale", "auto"],
+    for args in (["--resolution", "2K", "--scale", "auto"],
                  ["--resolution", "720p", "--scale", "quarter"]):
         r = runner.invoke(app, ["params", "save", "--job", "j1", *args,
                                 "--workdir", str(tmp_path)])

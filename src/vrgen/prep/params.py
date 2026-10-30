@@ -4,8 +4,9 @@ There are two different numbers behind "resolution", and mixing them up is the
 mistake this module exists to prevent:
 
 * **output resolution** is the platform's ``--resolution`` tier (480p/720p/
-  1080p). It is what the model returns (21:9 is 1470x630 at 720p, measured on
+  1080p/4K). It is what the model returns (21:9 is 1470x630 at 720p, measured on
   ship_01; the other rows come from the platform's published pixel table).
+  Only the models that publish 4K in their mode's ``resolutions`` accept it.
 * **input resolution** is how large the file we upload is. The model refuses
   rasters outside its pixel/byte budget, so vrgen rescales before upload. The
   prompt's ``{canvas_w}x{canvas_h}`` and band columns describe *this* file, not
@@ -32,7 +33,7 @@ __all__ = [
 ]
 
 INPUT_MODES = ("auto", "full", "half")
-OUTPUT_TIERS = ("480p", "720p", "1080p")
+OUTPUT_TIERS = ("480p", "720p", "1080p", "4K")
 
 #: 面向视频素材的生成模式；label 只用于页面展示，值仍然是 mglc 的模式名。
 MODE_LABELS = {
@@ -54,16 +55,22 @@ OUTPUT_SIZES_21_9: dict[str, tuple[int, int]] = {
 
 #: Canonical 16:9 tiers, used for the patch viewport (and as a fallback label
 #: for unusual aspects). 21:9 has its own table because the platform does not
-#: simply keep the short side fixed.
+#: simply keep the short side fixed. 4K is only listed for 16:9: the patch's
+#: 4K route is 16:9, and no 21:9 4K nominal has been verified.
 OUTPUT_SIZES_16_9: dict[str, tuple[int, int]] = {
     "480p": (854, 480),
     "720p": (1280, 720),
     "1080p": (1920, 1080),
+    "4K": (3840, 2160),
 }
 
 
 def output_options(aspect: float) -> list[dict]:
-    """Output tier -> nominal raster for this canvas aspect."""
+    """Output tier -> nominal raster for this canvas aspect.
+
+    Tiers without a verified nominal for this aspect are skipped (today that is
+    only 21:9 4K); the caller still filters by the model's own ``resolutions``.
+    """
     if abs(aspect - 21 / 9) < 0.02:
         table = OUTPUT_SIZES_21_9
     elif abs(aspect - 16 / 9) < 0.02:
@@ -71,7 +78,7 @@ def output_options(aspect: float) -> list[dict]:
     else:
         table = OUTPUT_SIZES_16_9
     return [{"value": name, "width": table[name][0], "height": table[name][1]}
-            for name in OUTPUT_TIERS]
+            for name in OUTPUT_TIERS if name in table]
 
 
 def input_options(canvas_size: tuple[int, int], spec: InputSpec,

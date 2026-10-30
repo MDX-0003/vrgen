@@ -579,6 +579,16 @@ def _pkg(tmp_path: Path, video: Path, mask: Path | None, workdir: Path) -> Input
                         variables={"theme": "黄昏"}, refs=tuple(refs))
 
 
+def test_prepare_round_rejects_resolution_the_model_does_not_offer(tmp_path, monkeypatch):
+    conf = config_mod.load(overrides=["mglc.resolution=4K"])
+    video, mask = _offline(monkeypatch, tmp_path)
+    runs = tmp_path / "runs"
+    _model_cache(runs / "j")                 # videoEdit 只发布 480p/720p/1080p
+    with pytest.raises(UsageError, match="只支持这些输出档"):
+        pipe.prepare_round(conf, _pkg(tmp_path, video, mask, runs),
+                           log=Log(quiet=True))
+
+
 def test_prepare_round_reads_the_constants_from_config(tmp_path, monkeypatch):
     conf = config_mod.load(overrides=["mglc.scale=half", "mglc.resolution=480p"])
     video, mask = _offline(monkeypatch, tmp_path)
