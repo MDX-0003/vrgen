@@ -70,7 +70,7 @@ def _apply_generation_params(conf, workdir, job, *, model_id, mode, resolution,
     """
     saved = jobs.load_generation_params(workdir, job)
     picks = {
-        "model_id": model_id,
+        "model_id": model_id if model_id is not None else saved.model_id,
         "mode": mode if mode is not None else saved.mode,
         "resolution": resolution if resolution is not None else saved.resolution,
         "duration_s": duration,
@@ -812,6 +812,9 @@ def params_show(
 @params_app.command("save")
 def params_save(
     job: str = typer.Option(..., "--job", help="job 名（调用方通常传 case 名）。"),
+    model_id: int = typer.Option(
+        None, "--model-id",
+        help="视频模型 ID（22 = Seedance 2.0 的 4K 路线）；不传保留已有值。"),
     resolution: str = typer.Option(None, "--resolution",
                                    help="输出档位：480p | 720p | 1080p | 4K；省略保留已有值。"),
     scale: str = typer.Option(None, "--scale",
@@ -838,6 +841,8 @@ def params_save(
     try:
         if resolution is not None and resolution not in params_mod.OUTPUT_TIERS:
             raise UsageError("resolution 只能是 480p | 720p | 1080p | 4K")
+        if model_id is not None and model_id < 1:
+            raise UsageError("model-id 必须是正整数")
         if scale is not None and scale not in params_mod.INPUT_MODES:
             raise UsageError("scale 只能是 auto | full | half")
         if session_id is not None and session_id < 0:
@@ -846,7 +851,7 @@ def params_save(
             raise UsageError("project-id 必须 >= 0")
         if episode is not None and episode < 0:
             raise UsageError("episode 必须 >= 0")
-        if all(v is None for v in (resolution, scale, mode, aspect_ratio,
+        if all(v is None for v in (model_id, resolution, scale, mode, aspect_ratio,
                                    session_id, project_id, episode)):
             raise UsageError("没有要保存的参数")
         saved = jobs.load_generation_params(workdir, job)
@@ -876,18 +881,21 @@ def params_save(
                 episode = saved.episode
             if episode and not project_id:
                 raise UsageError("给了 --episode 就必须给 --project-id")
+        effective_model = model_id if model_id is not None else saved.model_id
         effective_resolution = resolution if resolution is not None else saved.resolution
         effective_scale = scale if scale is not None else saved.scale
         jobs.save_generation_params(
             workdir, job,
-            jobs.GenerationParams(resolution=effective_resolution, scale=effective_scale,
+            jobs.GenerationParams(model_id=effective_model,
+                                  resolution=effective_resolution, scale=effective_scale,
                                   mode=mode, aspect_ratio=aspect_ratio,
                                   session_id=session_id or None,
                                   project_id=project_id or None,
                                   episode=episode or None))
     except VrgenError as exc:
         _fail(exc)
-    _echo_payload({"resolution": effective_resolution,
+    _echo_payload({"model_id": effective_model or 0,
+                   "resolution": effective_resolution,
                    "scale": effective_scale,
                    "mode": mode, "aspect_ratio": aspect_ratio,
                    "session_id": session_id or 0,

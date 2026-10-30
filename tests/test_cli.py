@@ -392,11 +392,12 @@ class _AllMedia4KModel:
 def _four_k_show(tmp_path, monkeypatch, aspect: str) -> dict:
     refs = _params_offline(tmp_path, monkeypatch)
     monkeypatch.setattr(vrgen_cli, "load_models",
-                        lambda *a, **kw: [_AllMedia4KModel()])
-    monkeypatch.setattr(vrgen_cli, "find_model",
-                        lambda models, code: _AllMedia4KModel())
+                        lambda *a, **kw: [_Model(), _AllMedia4KModel()])
+    monkeypatch.setattr(
+        vrgen_cli, "find_model",
+        lambda models, code: _AllMedia4KModel() if int(code) == 22 else _Model())
     jobs.save_generation_params(
-        tmp_path, "j1", jobs.GenerationParams(mode="allMediaRef"))
+        tmp_path, "j1", jobs.GenerationParams(model_id=22, mode="allMediaRef"))
     r = runner.invoke(app, ["params", "show", "--job", "j1",
                             "--refs", str(refs),
                             "--canvas", "1920x1080",
@@ -426,6 +427,33 @@ def test_output_options_4k_is_16_9_only():
                for item in params_mod.output_options(21 / 9))
 
 
+def test_params_save_model_id_switches_the_capability_view(tmp_path, monkeypatch):
+    refs = _params_offline(tmp_path, monkeypatch)
+    monkeypatch.setattr(vrgen_cli, "load_models",
+                        lambda *a, **kw: [_Model(), _AllMedia4KModel()])
+    monkeypatch.setattr(
+        vrgen_cli, "find_model",
+        lambda models, code: _AllMedia4KModel() if int(code) == 22 else _Model())
+    r = runner.invoke(app, ["params", "save", "--job", "j1",
+                            "--model-id", "22", "--mode", "allMediaRef",
+                            "--resolution", "4K", "--aspect-ratio", "16:9",
+                            "--workdir", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["model_id"] == 22
+    assert 'model_id = 22' in jobs.generation_params_path(
+        tmp_path, "j1").read_text(encoding="utf-8")
+
+    r = runner.invoke(app, ["params", "show", "--job", "j1", "--refs", str(refs),
+                            "--canvas", "1920x1080", "--source", "1920x1080",
+                            "--workdir", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    data = json.loads(r.output)
+    assert data["fixed"]["model_id"] == 22
+    assert data["current"]["mode"] == "allMediaRef"
+    assert data["current"]["aspect_ratio"] == "16:9"
+    assert {"value": "4K", "width": 3840, "height": 2160} in data["output"]
+
+
 def test_params_save_roundtrips_through_show(tmp_path, monkeypatch):
     refs = _params_offline(tmp_path, monkeypatch)
     wd = str(tmp_path)
@@ -433,7 +461,8 @@ def test_params_save_roundtrips_through_show(tmp_path, monkeypatch):
                             "--resolution", "720p", "--scale", "half",
                             "--workdir", wd])
     assert r.exit_code == 0, r.output
-    assert json.loads(r.output) == {"resolution": "720p", "scale": "half",
+    assert json.loads(r.output) == {"model_id": 0,
+                                    "resolution": "720p", "scale": "half",
                                     "mode": None, "aspect_ratio": None,
                                     "session_id": 0, "project_id": 0, "episode": 0}
     assert jobs.generation_params_path(tmp_path, "j1").is_file()
