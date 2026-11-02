@@ -10,6 +10,7 @@ from vrgen import jobs
 from vrgen.paths import templates_dir
 from vrgen.prep.prompt import (
     GEOMETRY_KEYS,
+    geometry_from_sizes,
     render,
     strip_aliases,
     template_aliases,
@@ -88,3 +89,28 @@ def test_prompt_overview_exposes_labels_and_help(tmp_path):
     assert payload["labels"]["plot"] == "情节"
     assert payload["help"]["subject"].startswith("写画面里")
     assert "asset_list" not in payload["labels"]      # 计算键不强制写别名
+
+
+def test_geometry_band_matches_the_mask_band():
+    """提示词的冗余带宽度必须等于 mask 的白带宽度（L = canvas_w - source_w）。
+
+    ``redundant_white`` 每侧标白 ``L`` 列：外侧副本 ``P`` 加相邻的 ``P`` 列真实
+    内容。早先这里按 ``P`` 渲染，提示词把白带说成一半宽、把主内容区说宽了 ``P`` 列，
+    模型手上的 mask 与文字对不上。
+    """
+    variables = geometry_from_sizes((9558, 4096), (8192, 4096))
+    assert variables["canvas_w"] == 9558
+    assert variables["band_w"] == 1366          # L，不是 P=683
+    assert variables["band_half"] == 683        # P
+    assert (variables["left_first"], variables["left_last"]) == (0, 1365)
+    assert (variables["main_first"], variables["main_last"]) == (1366, 8191)
+    assert variables["main_w"] == 6826
+    assert (variables["right_first"], variables["right_last"]) == (8192, 9557)
+
+
+def test_geometry_band_is_zero_without_redundancy():
+    """gen 一类的 canvas 与 source 同宽：带宽 0，主内容区就是整幅。"""
+    variables = geometry_from_sizes((1920, 1080), (1920, 1080))
+    assert variables["band_w"] == 0
+    assert (variables["main_first"], variables["main_last"]) == (0, 1919)
+    assert variables["main_w"] == 1920

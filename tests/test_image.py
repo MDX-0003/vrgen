@@ -277,7 +277,7 @@ def test_image_roles_text_includes_notes():
             "：头冠纹样与金色饰物。") in text
 
 
-def test_image_roles_text_covers_still_roles():
+def test_image_roles_text_covers_image_roles():
     text = image_mod.image_roles_text(["edit_master", "mask"])
     assert "图1 = 待重绘的 360 底图（本轮唯一要修改的底图）。" in text
     assert "图2 = 掩码图（黑色区域需要重绘，白色区域保持原样）。" in text
@@ -286,7 +286,8 @@ def test_image_roles_text_covers_still_roles():
 def test_image_roles_text_covers_lighting_ref():
     text = image_mod.image_roles_text(["edit_master", "mask", "lighting_ref"])
     assert "图3 = 氛围与光影参考图" in text
-    assert "不取构图" in text
+    assert "不取它的构图" in text
+    assert "场景与画面内容" in text
     assert "图3 = lighting_ref。" not in text
 
 
@@ -297,10 +298,10 @@ def test_full_redraw_img_template_renders(tmp_path):
         root, "j",
         sets={"edit": "把整座宫殿改成烛火通明、暖色高光的夜宴氛围",
               "preserve": "梁柱结构、陈设位置与构图不动"},
-        template="fullRedrawImg", vars_file="still-vars.toml")
+        template="fullRedrawImg", vars_file="img-vars.toml")
     result = runner.invoke(vrgen_cli.app, [
         "image", "submit", "--job", "j",
-        "--template", "fullRedrawImg", "--vars-file", "still-vars.toml",
+        "--template", "fullRedrawImg", "--vars-file", "img-vars.toml",
         "--image-role", "edit_master", "--image-role", "mask",
         "--image-role", "lighting_ref",
         "--image", str(images[0]), "--image", str(images[1]),
@@ -317,11 +318,13 @@ def test_full_redraw_img_template_renders(tmp_path):
     assert "夜宴氛围" in prompt
     assert "两份拷贝" in prompt
     assert "白色区域" in prompt
-    # 冗余带列号按 --canvas/--source 算出：带 683 px，主内容 8192 px。
+    # 冗余带列号按 --canvas/--source 算出，带宽取 L = canvas - source（与 mask
+    # 的白带同宽）：带 1366 px，主内容 6826 px。取 P=683 会让提示词把主内容区
+    # 说宽 683 列，与模型手上的 mask 不符。
     assert "画布宽 9558 像素" in prompt
-    assert "最左侧 683 像素（第 0–682 列）" in prompt
-    assert "最右侧 683 像素（第 8875–9557 列）" in prompt
-    assert "中间 8192 像素（第 683–8874 列）" in prompt
+    assert "最左侧 1366 像素（第 0–1365 列）" in prompt
+    assert "最右侧 1366 像素（第 8192–9557 列）" in prompt
+    assert "中间 6826 像素（第 1366–8191 列）" in prompt
     assert "{" not in prompt and "|" not in prompt
 
 
@@ -330,10 +333,10 @@ def test_image_submit_requires_canvas_and_source_together(tmp_path):
     root = tmp_path / "runs"
     jobs.edit_prompt_vars(
         root, "j", sets={"edit": "x", "preserve": "y"},
-        template="fullRedrawImg", vars_file="still-vars.toml")
+        template="fullRedrawImg", vars_file="img-vars.toml")
     result = runner.invoke(vrgen_cli.app, [
         "image", "submit", "--job", "j",
-        "--template", "fullRedrawImg", "--vars-file", "still-vars.toml",
+        "--template", "fullRedrawImg", "--vars-file", "img-vars.toml",
         "--image", str(images[0]), "--image-role", "edit_master",
         "--canvas", "9558x4096",
         "--workdir", str(root), "--dry-run"])
@@ -341,17 +344,17 @@ def test_image_submit_requires_canvas_and_source_together(tmp_path):
     assert "--canvas 与 --source 必须成对给出" in result.output
 
 
-def test_still360_local_template_renders(tmp_path):
+def test_img360_local_template_renders(tmp_path):
     images = _images(tmp_path)
     root = tmp_path / "runs"
     jobs.edit_prompt_vars(
         root, "j",
         sets={"edit": "把画中的人换成长袍文官",
               "preserve": "机位、场景与光照保持图1原样"},
-        template="still360-local", vars_file="still-vars.toml")
+        template="img360-local", vars_file="img-vars.toml")
     result = runner.invoke(vrgen_cli.app, [
         "image", "submit", "--job", "j",
-        "--template", "still360-local", "--vars-file", "still-vars.toml",
+        "--template", "img360-local", "--vars-file", "img-vars.toml",
         "--image-role", "edit_master", "--image-role", "mask",
         "--image", str(images[0]), "--image", str(images[1]),
         "--workdir", str(root), "--dry-run"])

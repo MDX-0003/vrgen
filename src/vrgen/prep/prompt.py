@@ -128,12 +128,14 @@ def geometry_from_sizes(canvas_size: tuple[int, int],
                         source_size: tuple[int, int]) -> dict[str, object]:
     """按本地 canvas/source 构造预览用几何变量（上传缩放按 100% 处理）。
 
-    生成（gen）的 canvas 与 source 相同，带宽为 0；补丁（patch/fullredraw）
-    的带宽取画布与源宽差的一半。实际上传被缩放时，真实像素值以台账为准。
+    带宽是 ``L = canvas_w - source_w``，与 mask 的白带同宽：``redundant_white``
+    每侧标记 ``L`` 列（外侧副本 ``P`` 加相邻的 ``P`` 列真实内容）。早先这里取
+    ``(w - sw) // 2``，等于 ``P``，提示词于是把白带说成一半宽、把主内容区说宽了
+    ``P`` 列，与模型手上的 mask 不符。
     """
     w, h = canvas_size
     sw, sh = source_size
-    band = max(0, (w - sw) // 2)
+    band = max(0, w - sw)
     geom = UploadGeometry(
         canvas_size=(w, h),
         source_size=(sw, sh),
@@ -179,10 +181,36 @@ def load_brief(path: str | Path) -> dict[str, str]:
     return {"brief": text.strip()}
 
 
+#: 渲染后只剩一节标题、没有正文的行，例如 ``【清理】``。
+_HEADING_ONLY = re.compile(r"^\s*【[^】]*】\s*$")
+
+
+def _blank(value: object) -> bool:
+    return value is None or not str(value).strip()
+
+
 def render(template_text: str, variables: Mapping[str, object]) -> str:
-    """Fill a template. Unknown placeholders are an error, not empty text."""
+    """Fill a template. Unknown placeholders are an error, not empty text.
+
+    一行里引用的占位符全部为空、且渲染后只剩 ``【标题】`` 或空白时，整行删掉：
+    空的可选段不该以裸标题的形式进入提示词。本行没有占位符的独立标题行不动，
+    所以 ``gen-multi`` 那种「标题一行、内容下一行」的写法不会被误删。
+
+    清理放在渲染这一步，``prompt show`` 的预览与 ``image/video submit`` 提交的
+    正文因此是同一份文本；过滤 vars 做不到这件事——模板展开仍要求每个占位符
+    有定义。
+    """
     try:
-        return strip_aliases(template_text).format_map(_Variables(variables))
+        fmt = _Variables(variables)
+        out: list[str] = []
+        for line in strip_aliases(template_text).split("\n"):
+            keys = template_placeholders(line)
+            rendered = line.format_map(fmt)
+            if keys and all(_blank(variables.get(key)) for key in keys) \
+                    and (not rendered.strip() or _HEADING_ONLY.match(rendered)):
+                continue
+            out.append(rendered)
+        return "\n".join(out)
     except AigcError:
         raise
     except (IndexError, ValueError) as exc:      # stray { } in the template
