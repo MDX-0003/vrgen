@@ -31,6 +31,7 @@ from ..platform.media import (
     scale_image,
     scale_reference_image,
     scale_video,
+    strip_audio,
 )
 from ..platform.models import ModeLimits, ModelInfo, find_model, load_models
 from ..prep.budget import InputSpec, check_image, check_input, fit_image_size
@@ -308,7 +309,9 @@ def _prepare_refs(conf, pkg: InputPackage, *, log) -> Prepared:
         "session_id": int(conf.get("mglc.session_id", 0)),
         "scale": f"{master_plan[2][0]}x{master_plan[2][1]}",
         "keep_sound": (bool(conf.get("mglc.keep_original_sound", True))
+                       and str(conf.get("mglc.audio", "keep")) != "none"
                        and any(a.kind == "video" for a in pkg.refs)),
+        "audio": str(conf.get("mglc.audio", "keep")),
         "canvas": f"{canvas[0]}x{canvas[1]}",
         "source": f"{source[0]}x{source[1]}",
         "template": pkg.template,
@@ -438,6 +441,11 @@ def execute_round(conf, pkg: InputPackage, prepared: Prepared, *, client: Mglc, 
         run.advance("succeeded")
         run.save()
         outcome.result = fetch_result(client, run, log=log)
+
+    # audio=none：平台没有「不生成声音」的参数，只能在结果落盘后去音轨。
+    # 放在闸门之前，入账的就是交付用的那份文件。
+    if str(run.params.get("audio", "keep")) == "none":
+        outcome.result = strip_audio(outcome.result, config=conf, log=log)
 
     # checked -- the GENERIC gate (decision D3): decodes, size on record. The
     # geometry gate (band correlation) belongs to vrstudio's recompose.

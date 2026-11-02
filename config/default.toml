@@ -14,6 +14,7 @@ duration_s       = 0        # 0 = 按输入帧数/fps 向上取整到整数秒�
 aspect_ratio     = "21:9"
 num              = 1        # 单次生成数量 1..4
 keep_original_sound = true  # 不带上原声，成片就没有音轨（实测缺陷）
+audio            = "keep"   # keep | none；none 在结果下载后去音轨（平台没有关闭声音的提交参数）
 session_id       = 0        # >0 = 在项目生成会话下提交，计费走项目额度；0 = 个人额度
 
 # --- 上传件 ---

@@ -59,13 +59,16 @@ def _root(
 
 
 def _apply_generation_params(conf, workdir, job, *, video_model_id, mode, resolution,
-                             duration, num, aspect_ratio, scale, session_id=None) -> None:
+                             duration, num, aspect_ratio, scale, session_id=None,
+                             audio=None) -> None:
     """Resolve submit parameters: CLI > generation.toml > config.
 
-    Every option except ``scale`` maps one-to-one onto a ``mglc video generate``
-    flag (``--mode`` is mglc ``--type``; ``--video-model-id`` is mglc
-    ``--model-id``). ``scale`` is vrgen's own upload decision and has no mglc
-    counterpart; it changes the prompt geometry. ``session_id`` selects a project
+    Every option except ``scale`` and ``audio`` maps one-to-one onto a ``mglc
+    video generate`` flag (``--mode`` is mglc ``--type``; ``--video-model-id`` is
+    mglc ``--model-id``). ``scale`` is vrgen's own upload decision and has no mglc
+    counterpart; it changes the prompt geometry. ``audio=none`` is also vrgen's
+    own: the platform has no "do not generate sound" flag, so the track is
+    stripped after download. ``session_id`` selects a project
     generation session, so the spend is billed to that project's balance instead
     of the personal one.
     """
@@ -81,6 +84,7 @@ def _apply_generation_params(conf, workdir, job, *, video_model_id, mode, resolu
                          else saved.aspect_ratio),
         "scale": scale if scale is not None else saved.scale,
         "session_id": session_id if session_id is not None else saved.session_id,
+        "audio": audio,
     }
     for key, value in picks.items():
         if value is not None:
@@ -109,6 +113,8 @@ def _apply_generation_params(conf, workdir, job, *, video_model_id, mode, resolu
             raise UsageError("--aspect-ratio 必须是 W:H（如 21:9），或 auto 表示跟随输入")
     if scale is not None and scale not in params_mod.INPUT_MODES:
         raise UsageError("--scale 只能是 auto | full | half")
+    if audio is not None and audio not in ("keep", "none"):
+        raise UsageError("--audio 只能是 keep | none")
     if saved.scale is not None and saved.scale not in params_mod.INPUT_MODES:
         raise UsageError(f"generation.toml: scale {saved.scale!r} 不合法")
     if int(conf.get("mglc.session_id", 0)) < 0:
@@ -208,6 +214,9 @@ def submit(
     session_id: int = typer.Option(
         None, "--session-id",
         help="项目生成会话 ID（>0）：在该项目的额度下提交；0 = 个人额度。"),
+    audio: str = typer.Option(
+        None, "--audio",
+        help="keep | none：none 时下载结果后去掉音轨（生成阶段平台无法关闭声音）。"),
     dry_run: bool = typer.Option(False, "--dry-run",
                                   help="只做本地半场（缩档+提示词+台账），不发请求不花钱。"),
     workdir: Path = typer.Option(None, "--workdir",
@@ -222,6 +231,7 @@ def submit(
             conf, workdir, job, video_model_id=video_model_id, mode=mode,
             resolution=resolution, duration=duration, num=num,
             aspect_ratio=aspect_ratio, scale=scale, session_id=session_id,
+            audio=audio,
         )
         if (canvas is None) != (source is None):
             raise UsageError("--canvas 与 --source 要么都给，要么都不给")
@@ -305,6 +315,8 @@ def submit(
 
     if dry_run:
         print("\n--dry-run：什么都没发，没花额度。")
+        if str(prepared.run.params.get("audio", "keep")) == "none":
+            print("audio       none（结果下载后去音轨；平台侧仍会生成声音）")
         _rounds_line(job, workdir)
         print(f"calls       {append_call_log(prepared.run, [], mode='vrgen submit --dry-run')}")
         return

@@ -9,6 +9,7 @@ byte caps are both below what ``vrpad pad`` produces: the canvas is 4668x2000
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -104,6 +105,31 @@ def scale_video(src: str | Path, dst: str | Path, size: tuple[int, int], *,
         log.info(f"scaling {src.name} -> {size[0]}x{size[1]}  {dst.name}")
     _run(args, f"scaling {src.name}")
     return dst
+
+
+def strip_audio(path: str | Path, *, config=None, log=None) -> Path:
+    """去掉结果音轨：视频流直接复制，不重编码；本来没有音轨时原样返回。
+
+    平台目前没有「不生成声音」的请求参数（mglc 只有 ``--keep-original-sound``，
+    而 firstLastFrame 的原生在结果里仍会带一条 AAC），所以 ``--audio none`` 只能在
+    下载后把音轨去掉。这里用 ``-map 0:v:0`` 只保留第一路视频，避免把封面图之类
+    附带流一起带过去。
+    """
+    path = Path(path)
+    info = videoio.probe(path, config)
+    if not info.has_audio:
+        return path
+    tmp = path.with_name(path.stem + ".no-audio" + path.suffix)
+    try:
+        _run([ffmpeg(config), "-y", "-v", "error", "-i", str(path),
+              "-map", "0:v:0", "-c:v", "copy", "-an", str(tmp)],
+             f"stripping audio from {path.name}")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+    if log is not None:
+        log.info(f"audio: stripped from {path.name}")
+    return path
 
 
 def scale_image(src: str | Path, dst: str | Path, size: tuple[int, int], *,

@@ -610,6 +610,71 @@ def test_prepare_round_reads_the_constants_from_config(tmp_path, monkeypatch):
     assert (prepared.run.dir / "refs.json").is_file()
 
 
+def test_prepare_round_audio_none_disables_keep_sound(tmp_path, monkeypatch):
+    """--audio none：结果下载后去音轨，同时不再让平台保留原声。"""
+    conf = config_mod.load(overrides=["mglc.audio=none"])
+    video, mask = _offline(monkeypatch, tmp_path)
+    runs = tmp_path / "runs"
+    _model_cache(runs / "j")
+    prepared = pipe.prepare_round(conf, _pkg(tmp_path, video, mask, runs), log=Log(quiet=True))
+
+    assert prepared.run.params["audio"] == "none"
+    assert prepared.run.params["keep_sound"] is False
+
+
+def test_strip_audio_copies_video_and_drops_the_track(tmp_path, monkeypatch):
+    """--audio none 的实现：只去音轨，不重编码视频流。"""
+    import vrgen.platform.media as platform_media
+    from vrgen.media import ProbeInfo
+
+    src = tmp_path / "result.mp4"
+    src.write_bytes(b"x")
+    calls = []
+    monkeypatch.setattr(platform_media, "ffmpeg", lambda config=None: "ffmpeg")
+    monkeypatch.setattr(platform_media.videoio, "probe",
+                        lambda path, config=None: ProbeInfo(
+                            (2, 2), 30.0, 1, 1.0, has_audio=True))
+    monkeypatch.setattr(platform_media, "_run",
+                        lambda args, what: calls.append(args))
+    monkeypatch.setattr(platform_media.os, "replace", lambda a, b: None)
+
+    platform_media.strip_audio(src)
+
+    args = calls[0]
+    assert "-an" in args
+    assert args[args.index("-c:v") + 1] == "copy"
+    assert args[args.index("-map") + 1] == "0:v:0"
+
+
+def test_strip_audio_is_a_noop_when_the_result_is_already_silent(tmp_path, monkeypatch):
+    import vrgen.platform.media as platform_media
+    from vrgen.media import ProbeInfo
+
+    src = tmp_path / "result.mp4"
+    src.write_bytes(b"x")
+    calls = []
+    monkeypatch.setattr(platform_media, "ffmpeg", lambda config=None: "ffmpeg")
+    monkeypatch.setattr(platform_media.videoio, "probe",
+                        lambda path, config=None: ProbeInfo(
+                            (2, 2), 30.0, 1, 1.0, has_audio=False))
+    monkeypatch.setattr(platform_media, "_run",
+                        lambda args, what: calls.append(args))
+
+    assert platform_media.strip_audio(src) == src
+    assert calls == []
+
+
+def test_prepare_round_audio_defaults_to_keep(tmp_path, monkeypatch):
+    conf = config_mod.load()
+    video, mask = _offline(monkeypatch, tmp_path)
+    runs = tmp_path / "runs"
+    _model_cache(runs / "j")
+    prepared = pipe.prepare_round(conf, _pkg(tmp_path, video, mask, runs), log=Log(quiet=True))
+
+    assert prepared.run.params["audio"] == "keep"
+    assert prepared.run.params["keep_sound"] is True
+
+
 def _model_cache_multi(workdir: Path) -> None:
     validator = dict(V25_VIDEOEDIT)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -937,6 +1002,7 @@ def test_mglc_config_absorbs_legacy_model_key(tmp_path, monkeypatch):
     ("mglc.video_model_id", "0"),
     ("mglc.resolution", '"9000p"'),
     ("mglc.num", "5"),
+    ("mglc.audio", '"silent"'),
     ("mglc.scale", '"4201x1800"'),
     ("mglc.poll_interval_s", "0"),
     ("mglc.upload_crf", "99"),
