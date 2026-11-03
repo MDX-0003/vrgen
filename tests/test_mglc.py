@@ -873,6 +873,41 @@ def test_prepare_round_is_idempotent(tmp_path, monkeypatch):
     assert len(list(runs.glob("j/*/run.json"))) == 1
 
 
+def test_prepare_round_resubmit_opens_a_second_round(tmp_path, monkeypatch):
+    """--resubmit 是另开一轮：同提示词、同素材，但目录与 key 都是新的。"""
+    conf = config_mod.load(overrides=["mglc.scale=half"])
+    video, mask = _offline(monkeypatch, tmp_path)
+    runs = tmp_path / "runs"
+    _model_cache(runs / "j")
+    pkg = _pkg(tmp_path, video, mask, runs)
+    first = pipe.prepare_round(conf, pkg, log=Log(quiet=True))
+    forced = pipe.prepare_round(conf, pkg, log=Log(quiet=True),
+                                resubmit_token="take-2")
+    assert forced.reused is False
+    assert forced.run.dir != first.run.dir
+    assert forced.run.key != first.run.key
+    assert any("resubmit" in note for note in forced.run.notes)
+    assert len(list(runs.glob("j/*/run.json"))) == 2
+
+    # 同一个 token 再来一次会命中它自己：resubmit 不是"每次调用都新开"。
+    same = pipe.prepare_round(conf, pkg, log=Log(quiet=True), resubmit_token="take-2")
+    assert same.reused is True and same.run.dir == forced.run.dir
+
+
+def test_resubmit_refuses_a_round_that_is_still_in_flight(tmp_path, monkeypatch):
+    conf = config_mod.load(overrides=["mglc.scale=half"])
+    video, mask = _offline(monkeypatch, tmp_path)
+    runs = tmp_path / "runs"
+    _model_cache(runs / "j")
+    pkg = _pkg(tmp_path, video, mask, runs)
+    first = pipe.prepare_round(conf, pkg, log=Log(quiet=True))
+    first.run.task_id = 7
+    first.run.advance("submitted")
+    first.run.save()
+    with pytest.raises(LedgerError, match="still running"):
+        pipe.prepare_round(conf, pkg, log=Log(quiet=True), resubmit_token="take-2")
+
+
 def _fake_round(monkeypatch, tmp_path, *, calls: list | None = None):
     conf = config_mod.load(overrides=["mglc.scale=half"])
     video, mask = _offline(monkeypatch, tmp_path)
@@ -943,7 +978,7 @@ def test_execute_round_refuses_a_failed_round(tmp_path, monkeypatch):
     prepared.run.save()
     with pytest.raises(LedgerError) as excinfo:
         pipe.execute_round(conf, pkg, prepared, client=client, log=Log(quiet=True))
-    assert "9" in str(excinfo.value) and "move" in str(excinfo.value)
+    assert "9" in str(excinfo.value) and "--resubmit" in str(excinfo.value)
 
 
 def test_a_round_past_prepare_still_re_verifies_its_assets(tmp_path, monkeypatch):

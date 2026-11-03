@@ -150,18 +150,22 @@ def _parse_wh(text: str, what: str) -> tuple[int, int]:
     return w, h
 
 
-def prepare_round(conf, pkg: InputPackage, *, log) -> Prepared:
+def prepare_round(conf, pkg: InputPackage, *, log,
+                  resubmit_token: str | None = None) -> Prepared:
     """The local half: build the upload artifacts, the prompt, and the ledger.
 
     Idempotent by run key: same inputs + same rendered prompt + same parameters
-    resolve to the same key and reuse the first run's directory.
+    resolve to the same key and reuse the first run's directory. ``resubmit_token``
+    (from ``--resubmit``) makes this one call a new round instead: the token enters
+    the key, so the old round stays untouched and this one is billed on its own.
     """
     if not pkg.refs:
         raise UsageError("提交清单为空：勾选要提交的素材后再提交")
-    return _prepare_refs(conf, pkg, log=log)
+    return _prepare_refs(conf, pkg, log=log, resubmit_token=resubmit_token)
 
 
-def _prepare_refs(conf, pkg: InputPackage, *, log) -> Prepared:
+def _prepare_refs(conf, pkg: InputPackage, *, log,
+                  resubmit_token: str | None = None) -> Prepared:
     """单一本地半场：校验 → 各自缩放 → 母版几何 → 提示词 → 台账。"""
     models = load_models(pkg.workdir, url=str(conf.get("mglc.model_list_url")),
                          max_age_h=float(conf.get("mglc.models_max_age_h", 24.0)), log=log)
@@ -323,6 +327,18 @@ def _prepare_refs(conf, pkg: InputPackage, *, log) -> Prepared:
     store = RunStore(pkg.workdir)
     extra = {"refs": [[p[0].id, sha256_16(p[0].path)] for p in ordered]}
     key = run_key(prompt, master_asset.path, None, params, extra)
+    if resubmit_token:
+        # --resubmit is a new take, not a retry: refuse while the previous round is
+        # still in flight (that task can never be cancelled), otherwise salt the key
+        # so this round gets a directory of its own.
+        in_flight = store.find_by_key(key)
+        if (in_flight is not None and in_flight.stage == "submitted"
+                and not in_flight.result):
+            raise LedgerError(
+                f"round {in_flight.dir.name} is still running as task "
+                f"{in_flight.task_id}; wait for it before --resubmit")
+        key = run_key(prompt, master_asset.path, None, params,
+                      {**extra, "resubmit": resubmit_token})
     existing = store.find_by_key(key)
     if existing is not None:
         log.warn(f"this round already exists: {existing.dir.name} "
@@ -330,6 +346,9 @@ def _prepare_refs(conf, pkg: InputPackage, *, log) -> Prepared:
         return Prepared(model, limits, geometry, master_plan[1], existing, reused=True)
 
     run = store.create(key, label=pkg.template, params=params, prompt=prompt)
+    if resubmit_token:
+        run.note(f"resubmitted with --resubmit (token {resubmit_token})")
+        run.save()
     log.step(f"round {run.dir.name}")
 
     prepared_upload: dict[str, tuple[Path, int, int]] = {}

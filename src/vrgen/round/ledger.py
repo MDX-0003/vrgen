@@ -110,7 +110,9 @@ def run_key(prompt: str, upload: str | Path, mask: str | Path | None = None,
     """Spend-once key: identical prompt + identical inputs + identical parameters.
 
     ``extra`` carries the gen multi-asset fingerprints (one hash per upload) so two
-    rounds that differ only in a secondary video cannot collide.
+    rounds that differ only in a secondary video cannot collide. It also carries the
+    one-off token of a deliberate ``--resubmit``, which is how "same prompt, another
+    take" becomes a round of its own instead of a reuse.
     """
     blob = {
         "prompt": hash_prompt(prompt),
@@ -125,10 +127,19 @@ def run_key(prompt: str, upload: str | Path, mask: str | Path | None = None,
 
 def failed_round_hint(run: Run) -> str:
     """How to retry a round whose task already died. Used by both refusal paths."""
-    return ("  that attempt failed. To send the same prompt again, move the run\n"
-            f"  directory aside and re-run -- the old task may still be billed, so\n"
-            f"  this is not done automatically:\n"
-            f"    move {run.dir} {run.dir.with_name(run.dir.name + '-failed')}")
+    return ("  that attempt failed. To send the same prompt again, re-run with\n"
+            "  --resubmit: it opens a new round instead of reusing this one. The old\n"
+            "  task may still be billed, so nothing is resent automatically:\n"
+            f"    {run.dir.name}")
+
+
+def resubmit_token() -> str:
+    """One-off identity for a deliberate resubmission.
+
+    It only enters the key hash; the round keeps it in ``notes`` for the audit trail.
+    """
+    from uuid import uuid4
+    return uuid4().hex
 
 
 def assert_spendable(run: Run, *, force: bool = False) -> None:

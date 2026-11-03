@@ -122,6 +122,19 @@ def test_image_round_lifecycle(tmp_path, monkeypatch):
     assert generate.count("--image ") == 2
 
 
+def test_image_resubmit_opens_a_second_round(tmp_path):
+    """图片流同一提示词再抽一版：key 变、目录变，旧轮保留。"""
+    images = _images(tmp_path)
+    conf = _conf(tmp_path)
+    pkg = _package(tmp_path, images)
+    first = prepare_image_round(conf, pkg, log=Log(quiet=True))
+    forced = prepare_image_round(conf, pkg, log=Log(quiet=True),
+                                 resubmit_token="take-2")
+    assert forced.reused is False
+    assert forced.run.dir != first.run.dir
+    assert len(list(pkg.workdir.glob("img-*/run.json"))) == 2
+
+
 def test_extract_task_ids_reads_every_sibling():
     payload = {"data": [{"taskId": 11, "imageId": 12},
                         {"taskId": 13, "imageId": 14}]}

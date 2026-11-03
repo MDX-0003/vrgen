@@ -28,7 +28,7 @@ from .prep import prompt as prompt_mod
 from .progress import Log
 from .round import image as image_mod
 from .round import kinds as kinds_mod
-from .round.ledger import PROGRESS_LOG, RunStore, append_call_log, shell_line
+from .round.ledger import PROGRESS_LOG, RunStore, append_call_log, resubmit_token, shell_line
 from .round.pipeline import InputPackage, execute_round, prepare_round
 from .round.task import build_generate_argv
 from .round.task import state as task_state
@@ -219,6 +219,9 @@ def submit(
         help="keep | none：none 时下载结果后去掉音轨（生成阶段平台无法关闭声音）。"),
     dry_run: bool = typer.Option(False, "--dry-run",
                                   help="只做本地半场（缩档+提示词+台账），不发请求不花钱。"),
+    resubmit: bool = typer.Option(
+        False, "--resubmit",
+        help="不再复用已有轮次：同提示词另开一轮并重新计费（多抽几版时用）。"),
     workdir: Path = typer.Option(None, "--workdir",
                                  help="台账根（默认 $VRGEN_RUNS_DIR）。"),
     config: Path = typer.Option(None, "--config", help="TOML 配置文件。"),
@@ -257,7 +260,8 @@ def submit(
                            template=template_id, variables=dict(merged.vars),
                            refs=ref_assets, canvas_size=canvas_size,
                            source_size=source_size)
-        prepared = prepare_round(conf, pkg, log=log)
+        prepared = prepare_round(conf, pkg, log=log,
+                                 resubmit_token=resubmit_token() if resubmit else None)
     except VrgenError as exc:
         _fail(exc)
 
@@ -266,6 +270,9 @@ def submit(
 
     print(f"job         {job}")
     print(f"round       {prepared.run.dir}")
+    if prepared.reused:
+        print(f"reused      {prepared.run.dir.name}  reason=key  "
+              f"task={prepared.run.task_id or '-'}  (本次未提交，未花费)")
     print(f"upload      {prepared.run.upload.get('path')}")
     print(f"            {prepared.geometry.describe()}")
     print(f"mask        {(prepared.run.mask or {}).get('path') or '(none)'}")
@@ -323,7 +330,7 @@ def submit(
 
     _wait_banner(conf, prepared)
     if prepared.run.task_id is not None:
-        _announce_task(prepared.run.task_id, resumed=True)
+        _announce_task(prepared.run.task_id, resumed=True, run=prepared.run)
     client = Mglc(config=conf, binary=find_mglc(conf))
     try:
         outcome = execute_round(conf, pkg, prepared, client=client, log=log,
@@ -354,8 +361,11 @@ def submit(
           f"(把这一轮结果拷回 case 并打印 recompose 命令)")
 
 
-def _announce_task(task_id: int, *, resumed: bool = False) -> None:
+def _announce_task(task_id: int, *, resumed: bool = False, run=None) -> None:
     """task id 一到手就交出去——等待以分钟计，用户该能在另一个终端瞟一眼。"""
+    if resumed:
+        where = run.dir.name if run is not None else "?"
+        print(f"reused      {where}  reason=resumed  task={task_id}  (本次未提交，未花费)")
     tail = "  (已提交过；继续等)" if resumed else ""
     print(f"task        {task_id}{tail}")
     print(f"peek        vrgen peek {task_id}")
@@ -421,6 +431,9 @@ def image_submit(
         None, "--source", metavar="WxH",
         help="源图尺寸（360 静图用）：与 --canvas 一起给，缺一不可。"),
     dry_run: bool = typer.Option(False, "--dry-run", help="只建台账并打印 argv，不发请求。"),
+    resubmit: bool = typer.Option(
+        False, "--resubmit",
+        help="不再复用已有轮次：同提示词另开一轮并重新计费（多抽几版时用）。"),
     workdir: Path = typer.Option(None, "--workdir", help="台账根（默认 $VRGEN_RUNS_DIR）。"),
     config: Path = typer.Option(None, "--config", help="TOML 配置文件。"),
 ) -> None:
@@ -468,13 +481,21 @@ def image_submit(
             resolution=resolved_resolution, num=resolved_num,
             workdir=jobs.job_dir(workdir, job), session_id=resolved_session,
             step=step)
-        prepared = kinds_mod.KINDS["image"].prepare_round(conf, pkg, log=log)
+        prepared = kinds_mod.KINDS["image"].prepare_round(
+            conf, pkg, log=log,
+            resubmit_token=resubmit_token() if resubmit else None)
     except VrgenError as exc:
         _fail(exc)
 
     log.attach(prepared.run.dir / PROGRESS_LOG)
     print(f"job         {job}")
     print(f"round       {prepared.run.dir}")
+    if prepared.reused:
+        print(f"reused      {prepared.run.dir.name}  reason=key  "
+              f"task={prepared.run.task_id or '-'}  (本次未提交，未花费)")
+    elif prepared.run.task_id is not None:
+        print(f"reused      {prepared.run.dir.name}  reason=resumed  "
+              f"task={prepared.run.task_id}  (本次未提交，未花费)")
     print(f"model       {resolved_model}  {resolved_ratio}  {resolved_resolution}  "
           f"x{resolved_num}")
     print(f"images      {', '.join(str(p) for p in pkg.images)}")

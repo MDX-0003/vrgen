@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..errors import AigcError, UsageError
+from ..errors import AigcError, LedgerError, UsageError
 from ..paths import sha256_16
 from ..platform.client import Mglc
 from ..platform.media import probe_image
@@ -115,8 +115,13 @@ class ImageOutcome:
     gate: dict[str, Any]
 
 
-def prepare_image_round(conf, pkg: ImagePackage, *, log) -> ImagePrepared:
-    """Validate, create the ledger round, and keep the candidate list on disk."""
+def prepare_image_round(conf, pkg: ImagePackage, *, log,
+                        resubmit_token: str | None = None) -> ImagePrepared:
+    """Validate, create the ledger round, and keep the candidate list on disk.
+
+    ``resubmit_token`` (from ``--resubmit``) makes this call a new round instead of
+    a reuse: the token enters the key, the old round stays as it was.
+    """
     if not pkg.prompt.strip():
         raise UsageError("--prompt 不能为空")
     if not pkg.images:
@@ -144,6 +149,15 @@ def prepare_image_round(conf, pkg: ImagePackage, *, log) -> ImagePrepared:
     extra = {"images": [sha256_16(p) for p in pkg.images]}
     key = run_key(pkg.prompt, pkg.images[0], None, params, extra)
     store = RunStore(pkg.workdir)
+    if resubmit_token:
+        in_flight = store.find_by_key(key)
+        if (in_flight is not None and in_flight.stage == "submitted"
+                and not in_flight.results):
+            raise LedgerError(
+                f"round {in_flight.dir.name} is still running as task "
+                f"{in_flight.task_id}; wait for it before --resubmit")
+        key = run_key(pkg.prompt, pkg.images[0], None, params,
+                      {**extra, "resubmit": resubmit_token})
     existing = store.find_by_key(key)
     if existing is not None:
         log.warn(f"this image round already exists: {existing.dir.name} "
@@ -152,6 +166,8 @@ def prepare_image_round(conf, pkg: ImagePackage, *, log) -> ImagePrepared:
 
     run = store.create(key, label="img", params=params, prompt=pkg.prompt,
                        upload=pkg.images[0])
+    if resubmit_token:
+        run.note(f"resubmitted with --resubmit (token {resubmit_token})")
     log.step(f"round {run.dir.name}")
     run.save()
     log.info(f"prompt -> {run.prompt_path}")
