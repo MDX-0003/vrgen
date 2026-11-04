@@ -114,6 +114,7 @@ def test_prompt_show_defaults_and_placeholders(tmp_path):
     assert "canvas_w" in data["geometry_keys"] and "canvas_w" not in data["vars"]
     assert data["labels"]["theme"] == "主题 / 场景"     # 模板别名（契约 §4）
     assert data["labels"]["plot"] == "情节"
+    assert data["labels"]["style"] == "目标画面"        # 决策 81：从「风格」改名
     assert data["help"]["theme"].startswith("写场景主题")
     assert "360-closure" in data["available"]
 
@@ -711,6 +712,20 @@ def test_360_template_renders_plot_and_allowed_changes():
     assert "输出像素尺寸由平台分辨率档决定" in text
     assert "最后一张图片：区域标注图" in text
     assert "不出现最后一张图片的黑白色块" in text
+    # 目标画面在保全与允许变化之前（决策 81）；style 正文也落在主体保全之前。
+    assert text.index("【目标画面】") < text.index("【允许变化】")
+    assert text.index("【允许变化】") < text.index("【主体保全】")
+    assert text.index("电影级写实") < text.index("【主体保全】")
+
+
+def test_360_template_orders_target_before_preservation():
+    from vrgen.paths import templates_dir
+
+    template = (templates_dir() / "360-closure.md").read_text(encoding="utf-8")
+    assert template.index("【目标画面】") < template.index("【允许变化】")
+    assert template.index("【允许变化】") < template.index("【主体保全】")
+    assert "{style|目标画面|" in template
+    assert "严格编辑" not in template
 
 
 def test_360_template_drops_mask_note_without_mask():
