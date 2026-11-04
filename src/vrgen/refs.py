@@ -192,6 +192,12 @@ def duration_source(mode: str) -> str:
     return "longest" if mode == "allMediaRef" else "master"
 
 
+MASK_NOTE = ("最后一张图片：区域标注图（黑白）。白色是左右两条冗余带，"
+             "黑色是主内容区；它只说明区域位置，不是画面内容。")
+MASK_BAN = "不出现最后一张图片的黑白色块与边界线；"
+"""模板里的区域标注段；清单没有 mask 时由 :func:`mask_variables` 置空。"""
+
+
 def asset_list(refs: tuple[RefAsset, ...]) -> str:
     """``@Video1：…`` / ``@Image1：…``。
 
@@ -208,6 +214,17 @@ def asset_list(refs: tuple[RefAsset, ...]) -> str:
         label = ("Video" if asset.kind == "video" else "Image") + str(counters[asset.kind])
         lines.append(f"@{label}：{ROLE_PROMPT[asset.role]}")
     return "\n".join(lines)
+
+
+def mask_variables(refs: tuple[RefAsset, ...]) -> dict[str, str]:
+    """模板的区域标注占位：有 mask 时给固定文案，没有时为空串。
+
+    空串让 ``prompt.render`` 把只有该占位符的行整行删掉；``mask_ban`` 在
+    ``【禁止】`` 行中间，空串不会删行，只会去掉那一句。
+    """
+    present = any(a.kind == "image" and a.role == "mask" for a in refs)
+    return {"mask_note": MASK_NOTE if present else "",
+            "mask_ban": MASK_BAN if present else ""}
 
 
 def mode_variables(mode: str) -> dict[str, str]:

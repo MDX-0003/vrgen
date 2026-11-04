@@ -655,7 +655,9 @@ def _prompt_preview(payload: dict, *, workdir, job: str,
     variables: dict[str, object] = dict(payload.get("vars") or {})
     try:
         if refs is not None:
-            variables["asset_list"] = refs_mod.asset_list(refs_mod.load_refs(refs))
+            loaded = refs_mod.load_refs(refs)
+            variables["asset_list"] = refs_mod.asset_list(loaded)
+            variables.update(refs_mod.mask_variables(loaded))
         resolved_mode = mode
         if resolved_mode is None:
             resolved_mode = jobs.load_generation_params(workdir, job).mode

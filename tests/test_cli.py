@@ -699,6 +699,8 @@ def test_360_template_renders_plot_and_allowed_changes():
     text = render(template, {
         **geometry_variables(geom),
         "asset_list": "@Video1：编辑母版，负责时间轴、构图与动作基准。",
+        "mask_note": "最后一张图片：区域标注图（黑白）。",
+        "mask_ban": "不出现最后一张图片的黑白色块与边界线；",
         "theme": "黄昏下的木质帆船", "style": "电影级写实",
         "plot": "帆船沿原航向前进", "action": "船帆随风轻微摆动",
         "allowed_changes": "无。",
@@ -707,5 +709,31 @@ def test_360_template_renders_plot_and_allowed_changes():
     assert "【情节与动作】" in text and "帆船沿原航向前进" in text
     assert "【允许变化】" in text and "无。" in text
     assert "输出像素尺寸由平台分辨率档决定" in text
+    assert "最后一张图片：区域标注图" in text
+    assert "不出现最后一张图片的黑白色块" in text
+
+
+def test_360_template_drops_mask_note_without_mask():
+    from pathlib import Path
+
+    from vrgen.paths import templates_dir
+    from vrgen.prep.prompt import geometry_variables, render
+    from vrgen.prep.scale import scaled_geometry
+    from vrgen.refs import RefAsset, mask_variables
+
+    template = (templates_dir() / "360-closure.md").read_text(encoding="utf-8")
+    geom = scaled_geometry((4668, 2000), (4000, 2000), (4400, 1884))
+    refs = (RefAsset("pad", "video", "edit_master", Path("pad.mp4")),)
+    text = render(template, {
+        **geometry_variables(geom),
+        **mask_variables(refs),
+        "asset_list": "@Video1：编辑母版，负责时间轴、构图与动作基准。",
+        "theme": "黄昏下的木质帆船", "style": "电影级写实",
+        "plot": "帆船沿原航向前进", "action": "船帆随风轻微摆动",
+        "allowed_changes": "无。",
+    })
+    assert "最后一张图片" not in text
+    assert "区域标注图" not in text
+    assert "【禁止】无字幕" in text
 
 

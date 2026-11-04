@@ -283,6 +283,7 @@ def _prepare_refs(conf, pkg: InputPackage, *, log,
     variables.update(pkg.variables)
     variables.update(refs_mod.mode_variables(limits.mode))
     variables["asset_list"] = refs_mod.asset_list(pkg.refs)
+    variables.update(refs_mod.mask_variables(pkg.refs))
     prompt = render(template_path.read_text(encoding="utf-8"), variables)
 
     ordered = [planned[a.id] for a in pkg.refs]

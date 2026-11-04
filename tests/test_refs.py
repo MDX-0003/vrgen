@@ -8,9 +8,12 @@ import pytest
 
 from vrgen.errors import UsageError
 from vrgen.refs import (
+    MASK_BAN,
+    MASK_NOTE,
     RefAsset,
     asset_list,
     load_refs,
+    mask_variables,
     master,
     mode_variables,
     validate_counts,
@@ -104,6 +107,15 @@ def test_mask_is_not_numbered(tmp_path):
     assert "@Image1：主体参考" in text
     assert "@Image2" not in text
     assert "编辑区域标注" not in text
+
+
+def test_mask_variables_follow_refs(tmp_path):
+    path, _v1, _v2, _i1 = _refs(tmp_path)
+    refs = load_refs(path)
+    assert mask_variables(refs) == {"mask_note": "", "mask_ban": ""}
+    mask = RefAsset("mask", "image", "mask", refs[2].path)
+    assert mask_variables(refs + (mask,)) == {"mask_note": MASK_NOTE,
+                                              "mask_ban": MASK_BAN}
 
 
 def test_allmediaref_master_must_be_first(tmp_path):
