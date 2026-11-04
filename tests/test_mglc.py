@@ -998,6 +998,19 @@ def test_a_round_past_prepare_still_re_verifies_its_assets(tmp_path, monkeypatch
 # ------------------------------------------------------- round: the call log
 
 
+def test_log_timestamps_are_utc_plus_8_with_explicit_offset():
+    from datetime import UTC, datetime, timedelta
+
+    from vrgen.platform.client import _now_log
+    from vrgen.round.ledger import _now_log as ledger_now_log
+    now = datetime.now(UTC)
+    for stamp in (_now_log(), ledger_now_log()):
+        # fromisoformat 读出时刻自带的偏移，比较的是同一时刻，不做加减换算。
+        moment = datetime.fromisoformat(stamp)
+        assert moment.utcoffset() == timedelta(hours=8), stamp
+        assert abs((moment - now).total_seconds()) < 120, stamp
+
+
 def test_call_log_appends_every_attempt(tmp_path):
     from vrgen.round.ledger import append_call_log
     video = tmp_path / "v.mp4"
@@ -1005,16 +1018,19 @@ def test_call_log_appends_every_attempt(tmp_path):
     run = RunStore(tmp_path / "runs").create(run_key("p", video, None, {}),
                                              params={}, prompt="p", upload=video)
     good = Envelope(("mglc", "virtual-ip", "upload"), 0, {}, "", "",
-                    "2026-09-23T10:00:00Z")
+                    "2026-09-23T10:00:00+08:00")
     bad = Envelope(("mglc", "video", "generate"), -400, None,
-                   "第1个资产不存在或不属于当前企业", "", "2026-09-23T10:01:00Z")
+                   "第1个资产不存在或不属于当前企业", "", "2026-09-23T10:01:00+08:00")
     append_call_log(run, [good], mode="attempt 1")
     path = append_call_log(run, [bad], mode="attempt 2")
-    text = path.read_text(encoding="utf-8")
-    assert text.count("===") == 2
-    assert "code=-400" in text and "不属于当前企业" in text
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert sum(line.startswith("=== ") for line in lines) == 2
+    # vrgen 是一级，mglc 调用缩进一级，msg/data 再缩进一级。
+    assert any(line.startswith("  [") and "code=-400" in line for line in lines)
+    assert any(line.startswith("      msg: ") and "不属于当前企业" in line
+               for line in lines)
     # 空载荷不写 data 行（上传的信封 data={}）。
-    assert "data:" not in text
+    assert "data:" not in "\n".join(lines)
 
 
 def test_call_log_writes_the_reply_payload_with_signed_urls_trimmed(tmp_path):
@@ -1028,10 +1044,10 @@ def test_call_log_writes_the_reply_payload_with_signed_urls_trimmed(tmp_path):
     envelope = Envelope(("mglc", "virtual-ip", "info", "1"), 0,
                         {"data": [{"assetId": 2067904785470336, "status": "active",
                                    "fileUrl": signed}], "msg": "OK"},
-                        "OK", "", "2026-11-03T10:00:00Z")
+                        "OK", "", "2026-11-03T10:00:00+08:00")
     path = append_call_log(run, [envelope], mode="vrgen submit")
     text = path.read_text(encoding="utf-8")
-    assert "    data: " in text
+    assert "      data: " in text
     assert '"assetId":2067904785470336' in text
     assert '"status":"active"' in text
     assert "x.mp4" in text and "q-signature" not in text

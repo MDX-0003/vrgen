@@ -22,7 +22,7 @@ import json
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC
+from datetime import UTC, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -32,10 +32,14 @@ from .binpath import require_mglc
 NOT_LOGGED_IN = 10002
 BAD_CREDENTIALS = -401
 
+#: mglc.log 的 `[...]` 行是给人复盘用的，用东八区。时刻本身带时区信息（``isoformat``
+#: 直接给出 ``+08:00`` 偏移），读到的人不用猜、也不用做加减法换算。
+LOG_TZ = timezone(timedelta(hours=8))
 
-def _now_utc() -> str:
+
+def _now_log() -> str:
     from datetime import datetime
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(LOG_TZ).isoformat(timespec="seconds")
 
 
 def subprocess_runner(argv: Sequence[str], timeout: float) -> subprocess.CompletedProcess:
@@ -52,7 +56,7 @@ class Envelope:
     data: Any
     msg: str
     stdout: str
-    utc: str = ""                       # when the call was made, for the round log
+    utc: str = ""                       # when the call was made, for the round log (UTC+8)
 
     @property
     def ok(self) -> bool:
@@ -97,7 +101,7 @@ class Mglc:
         payload = _parse_envelope(stdout)
         if payload is None:
             if allow_text:
-                env = Envelope(tuple(argv), 0, None, "", stdout, _now_utc())
+                env = Envelope(tuple(argv), 0, None, "", stdout, _now_log())
                 self.transcript.append(env)
                 return env
             head = stdout.strip()[:300] or (proc.stderr or "").strip()[:300]
@@ -108,7 +112,7 @@ class Mglc:
             )
 
         env = Envelope(tuple(argv), int(payload.get("code", 0)), payload.get("data"),
-                       str(payload.get("msg", "")), stdout, _now_utc())
+                       str(payload.get("msg", "")), stdout, _now_log())
         self.transcript.append(env)
         if not env.ok:
             raise _as_error(env)

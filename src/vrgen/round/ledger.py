@@ -262,6 +262,14 @@ def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _now_log() -> str:
+    """mglc.log 头部时间：东八区、时刻自带偏移；run.json 的 *_utc 字段仍用 UTC。"""
+    from datetime import datetime
+
+    from ..platform.client import LOG_TZ
+    return datetime.now(LOG_TZ).isoformat(timespec="seconds")
+
+
 def shell_line(argv: Sequence[str]) -> str:
     """One copy-pastable command line, quoting only what needs it."""
     out: list[str] = []
@@ -304,6 +312,10 @@ def append_call_log(run: Run, calls: Sequence, *, mode: str) -> Path:
     what succeeded, which is exactly why the first "asset does not belong to this
     enterprise" was invisible afterwards.
 
+    The ``===`` header is the vrgen-level invocation; each mglc call it made is
+    indented one level beneath it, so a scroll through the file shows the shape
+    (one vrgen run -> N mglc calls) before any text is read.
+
     ``calls`` are :class:`~vrpad.aigc.platform.client.Envelope` objects; each one
     writes when, code, argv, message, and the reply payload. ``msg: OK`` only says
     the request was accepted -- the business answer (asset id, review state, task
@@ -313,17 +325,17 @@ def append_call_log(run: Run, calls: Sequence, *, mode: str) -> Path:
     """
     path = run.dir / CALL_LOG
     path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [f"=== {_now()}  {mode}"]
+    lines = [f"=== {_now_log()}  {mode}"]
     if not calls:
         lines.append("    (no external calls)")
     for envelope in calls:
-        lines.append(f"[{getattr(envelope, 'utc', '') or '?'}] "
+        lines.append(f"  [{getattr(envelope, 'utc', '') or '?'}] "
                      f"code={envelope.code}  {shell_line(envelope.argv)}")
         if envelope.msg:
-            lines.append(f"    msg: {envelope.msg}")
+            lines.append(f"      msg: {envelope.msg}")
         data = _loggable_data(getattr(envelope, "data", None))
         if data not in (None, {}, []):
-            lines.append(f"    data: "
+            lines.append(f"      data: "
                          f"{json.dumps(data, ensure_ascii=False, separators=(',', ':'))}")
     with path.open("a", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")
