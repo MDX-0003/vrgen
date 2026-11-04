@@ -62,10 +62,6 @@ class LedgerError(AigcError):
     """A run-ledger problem: a duplicate spend, a missing run, a key collision."""
 
 
-class AssetError(AigcError):
-    """The SD-compliance asset library refused, or never approved, an input."""
-
-
 class TaskFailed(AigcError):
     """The generation task reached a terminal non-success state.
 

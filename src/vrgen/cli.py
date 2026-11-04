@@ -226,7 +226,7 @@ def submit(
                                  help="台账根（默认 $VRGEN_RUNS_DIR）。"),
     config: Path = typer.Option(None, "--config", help="TOML 配置文件。"),
 ) -> None:
-    """提交一轮生成：本地半场 → 素材登记 → 提交 → 轮询 → 下载 → 通用闸门。"""
+    """提交一轮生成：本地半场 → 提交 → 轮询 → 下载 → 通用闸门。"""
     log = Log()
     try:
         conf = config_mod.load(config)
@@ -292,8 +292,7 @@ def submit(
         aspect_ratio=str(prepared.run.params["aspect_ratio"]),
         num=int(prepared.run.params.get("num", 1)),
         keep_sound=bool(prepared.run.params.get("keep_sound", True)),
-        session_id=int(prepared.run.params.get("session_id", 0) or 0),
-        preview=True)
+        session_id=int(prepared.run.params.get("session_id", 0) or 0))
     ledger_refs = prepared.run.params.get("refs") or []
     if str(prepared.run.params.get("mode")) == "firstLastFrame":
         by_role = {str(item.get("role")): item for item in ledger_refs}
@@ -303,19 +302,16 @@ def submit(
             raise UsageError("firstLastFrame 台账缺 first_frame 或 last_frame")
         gen_argv = build_generate_argv(
             **common,
-            first_image=(str(first["upload"]), None),
-            last_image=(str(last["upload"]), None))
+            first_image=str(first["upload"]),
+            last_image=str(last["upload"]))
     else:
-        videos = [(str(item["upload"]),
-                   prepared.run.assets.get(f"video:{item['id']}"))
-                  for item in ledger_refs if item.get("kind") == "video"]
+        videos = [str(item["upload"]) for item in ledger_refs
+                  if item.get("kind") == "video"]
         # mask 固定追加在所有图片之后（装配器已经排在最后，这里再保证一次）。
-        images = [(str(item["upload"]),
-                   prepared.run.assets.get(f"image:{item['id']}"))
-                  for item in ledger_refs
+        images = [str(item["upload"]) for item in ledger_refs
                   if item.get("kind") == "image" and item.get("role") != "mask"]
-        images += [(str(item["upload"]), prepared.run.assets.get(f"image:{item['id']}"))
-                   for item in ledger_refs if item.get("role") == "mask"]
+        images += [str(item["upload"]) for item in ledger_refs
+                   if item.get("role") == "mask"]
         gen_argv = build_generate_argv(**common, videos=videos, images=images)
     command = shell_line([find_mglc(conf) or "mglc", "video", "generate", *gen_argv])
     print(f"\ncommand     {command}")
@@ -376,7 +372,7 @@ def _wait_banner(conf, prepared) -> None:
     minutes = f"~{estimate / 60:.0f} min" if estimate else "several minutes"
     if prepared.run.task_id is not None and prepared.run.result:
         return
-    print("\n-> platform  上传 + 审核，提交，然后等渲染")
+    print("\n-> platform  提交（参考素材由平台自动上传登记），然后等渲染")
     print(f"   {prepared.model.name} 自报 {minutes} 每次渲染；"
           f"每 {conf.get('mglc.poll_interval_s'):g}s 轮询，"
           f"{conf.get('mglc.poll_timeout_s'):g}s 后放弃")

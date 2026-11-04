@@ -67,11 +67,6 @@ class RefAsset:
     path: Path
     sha256: str | None = None
 
-    @property
-    def key(self) -> str:
-        """台账 assets 的分组键，如 ``video:v1``。"""
-        return f"{self.kind}:{self.id}"
-
 
 def load_refs(path: str | Path) -> tuple[RefAsset, ...]:
     """读并校验素材清单；路径相对 JSON 文件所在目录解析。"""

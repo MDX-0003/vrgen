@@ -134,21 +134,6 @@ class Mglc:
     def model_detail(self, model_id: int, model_type: str = "video") -> Envelope:
         return self.call("model", "--type", model_type, "--model-id", str(int(model_id)))
 
-    def asset_upload(self, path: str | Path, name: str, kind: str) -> Envelope:
-        return self.call("virtual-ip", "upload", "--file", str(path),
-                         "--name", name, "--type", kind)
-
-    def asset_info(self, asset_id: int) -> Envelope:
-        return self.call("virtual-ip", "info", str(int(asset_id)))
-
-    def asset_list(self, status: str | None = None, kind: str | None = None) -> Envelope:
-        args = ["virtual-ip", "list"]
-        if status:
-            args += ["--status", status]
-        if kind:
-            args += ["--type", kind]
-        return self.call(*args)
-
     def project_list(self) -> Envelope:
         return self.call("project", "list")
 

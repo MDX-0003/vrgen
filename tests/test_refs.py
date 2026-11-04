@@ -50,7 +50,6 @@ def test_load_refs_resolves_relative_paths_and_hashes(tmp_path):
     refs = load_refs(path)
     assert [a.id for a in refs] == ["v1", "v2", "i1"]
     assert refs[0].path == v1.resolve()
-    assert refs[0].key == "video:v1"
 
 
 def test_load_refs_rejects_duplicates_and_bad_roles(tmp_path):

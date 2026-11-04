@@ -37,7 +37,6 @@ _FALLBACK: dict = {
         "models_max_age_h": 24.0,
         "poll_interval_s": 20.0,
         "poll_timeout_s": 3600.0,
-        "review_timeout_s": 1800.0,
         "image_model_id": 44,
         "image_ratio": "16:9",
         "image_resolution": "4K",
@@ -191,7 +190,7 @@ def _validate(data: dict) -> None:
         raise ConfigError("mglc.model_list_url must be an http(s) URL")
     if float(mglc["models_max_age_h"]) < 0:
         raise ConfigError("mglc.models_max_age_h must be >= 0")
-    for key in ("poll_interval_s", "poll_timeout_s", "review_timeout_s"):
+    for key in ("poll_interval_s", "poll_timeout_s"):
         if float(mglc[key]) <= 0:
             raise ConfigError(f"mglc.{key} must be > 0")
     if not 0 <= float(mglc["upload_crf"]) <= 51:

@@ -27,7 +27,9 @@ from ..paths import sha256_16
 from ..prep.prompt import hash_prompt
 
 #: Lifecycle. Forward-only in practice; ``failed`` is the one off-ramp.
-STAGES = ("prepared", "assets_ready", "submitted", "succeeded", "failed",
+#: ``assets_ready`` 已随手动 SD 合规登记一起退役（决策 75）：旧 run.json 里出现该
+#: stage 时只作历史事实读取，不再是可推进的目标。
+STAGES = ("prepared", "submitted", "succeeded", "failed",
           "fetched", "checked")
 
 RUN_FILE = "run.json"
@@ -47,7 +49,7 @@ class Run:
     prompt_hash: str = ""
     upload: dict[str, Any] = field(default_factory=dict)        # the video we send
     mask: dict[str, Any] | None = None
-    assets: dict[str, int] = field(default_factory=dict)        # kind -> asset id
+    assets: dict[str, int] = field(default_factory=dict)        # 退役（决策 75）：只读兼容旧台账，不再写入
     task_id: int | None = None
     task_ids: list[int] | None = None      # image batches: one id per sibling task
     result: str | None = None
@@ -62,6 +64,8 @@ class Run:
     def to_dict(self) -> dict[str, Any]:
         out = dict(self.__dict__)
         out["dir"] = str(self.dir)
+        if not out.get("assets"):
+            out.pop("assets", None)   # 退役字段（决策 75）：新轮次不再写空字典
         return out
 
     def save(self) -> Path:
@@ -318,10 +322,10 @@ def append_call_log(run: Run, calls: Sequence, *, mode: str) -> Path:
 
     ``calls`` are :class:`~vrpad.aigc.platform.client.Envelope` objects; each one
     writes when, code, argv, message, and the reply payload. ``msg: OK`` only says
-    the request was accepted -- the business answer (asset id, review state, task
-    id, ``failReason``) lives in ``data``, and a log without it cannot answer "what
-    did the platform actually say" after the fact. Signed URL query strings are
-    stripped from the payload before it is written.
+    the request was accepted -- the business answer (``taskId``, ``failReason``,
+    asset lookup results) lives in ``data``, and a log without it cannot answer
+    "what did the platform actually say" after the fact. Signed URL query strings
+    are stripped from the payload before it is written.
     """
     path = run.dir / CALL_LOG
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -8,7 +8,7 @@
 2. **末段闸门换通用闸门**（决策 D3）：vrpad 在这里跑带相关配准（几何闸门），
    那属于 vrstudio 的 recompose；vrgen 只验证"结果能解码、尺寸/帧数在册"。
 
-阶段不变：prepared（本地免费）→ assets（平台状态）→ submitted（花钱、不可逆）
+阶段不变：prepared（本地免费）→ submitted（花钱、不可逆）
 → succeeded（轮询）→ fetched（结果落盘）→ checked（通用闸门入账）。
 
 决策 33 起只有一条 local half：提交 = ``--refs`` 清单（三个流程同构）。流程差异
@@ -44,7 +44,6 @@ from ..prep.scale import (
     plain_geometry,
     scaled_geometry,
 )
-from .assets import ensure_assets
 from .ledger import STAGES, Run, RunStore, failed_round_hint, run_key
 from .task import fetch as fetch_result
 from .task import submit as submit_task
@@ -91,7 +90,6 @@ class Outcome:
     run: Run
     result: Path | None = None
     gate: dict | None = None
-    assets: dict[str, int] = field(default_factory=dict)
     submitted: int | None = None       # task id, only when THIS call submitted
     rounds: list[str] = field(default_factory=list)   # ledger summary, for the console
 
@@ -413,26 +411,12 @@ def execute_round(conf, pkg: InputPackage, prepared: Prepared, *, client: Mglc, 
     from ..manual import probe_gate
 
     run = prepared.run
-    outcome = Outcome(run=run, assets=dict(run.assets))
+    outcome = Outcome(run=run)
     store = RunStore(pkg.workdir)
 
-    # assets -- needed whenever we are about to submit, which is exactly when a stale
-    # recorded id would hurt (the account-switch -400 case).
-    if run.task_id is None:
-        ledger_refs = run.params.get("refs") or []
-        if str(run.params.get("mode")) == "firstLastFrame":
-            # CLI 的 --first-image/--last-image 没有 asset-id 参数，首尾图按路径直传。
-            log.info("firstLastFrame：首尾图直传，跳过 SD 合规素材登记")
-        else:
-            items = [(f"{item['kind']}:{item['id']}", item["kind"], item["upload"])
-                     for item in ledger_refs]
-            outcome.assets = ensure_assets(
-                client, run, refs=items,
-                timeout=float(conf.get("mglc.review_timeout_s", 1800.0)),
-                interval=max(5.0, float(conf.get("mglc.poll_interval_s", 20.0)) / 2),
-                log=log)
-        run.advance("assets_ready")
-        run.save()
+    # 参考素材不再手动登记 SD 合规资产（决策 75）：--video/--image 只传本地路径，
+    # 平台在 generate 时自动上传登记。旧轮次台账里的 assets 键与 assets_ready
+    # stage 只读兼容，不构成任何分支。
 
     # submit -- the only irreversible, quota-spending call in the package.
     if run.task_id is None:

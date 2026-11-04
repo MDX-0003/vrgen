@@ -28,7 +28,6 @@ from vrgen.prep.scale import choose_upload_size, parse_size_mode, scaled_geometr
 from vrgen.progress import Log
 from vrgen.refs import RefAsset
 from vrgen.round import task as task_mod
-from vrgen.round.assets import asset_state, classify, ensure_assets, extract_asset_id, status_of
 from vrgen.round.ledger import RunStore, assert_spendable, run_key
 from vrgen.round.pipeline import InputPackage
 
@@ -174,7 +173,7 @@ def test_model_list_parses_the_seedance_shape():
     model = find_model(models, 37)
     assert model.name == "Seedance 2.5"
     assert model.video_input_modes == ("videoEdit",)
-    assert model.mode("videoEdit").support_virtual_ip is True
+    assert model.mode("videoEdit").max_count == 10
     assert model.mode("firstFrame").takes_video is False
 
 
@@ -262,20 +261,18 @@ def test_spend_guard_blocks_a_second_submission(tmp_path):
 # ------------------------------------------------------------- round: task
 
 
-def test_build_generate_argv_requires_asset_ids():
+def test_build_generate_argv_passes_paths_without_asset_ids():
+    """决策 75：参考素材只传本地路径，不伴随 --video-asset-id / --asset-id。"""
     common = dict(prompt="p", model_id=37, mode="videoEdit", duration_s=8,
                   resolution="720p", aspect_ratio="21:9", num=1)
-    with pytest.raises(AigcError):
-        task_mod.build_generate_argv(**common, videos=[("up.mp4", None)])
     argv = task_mod.build_generate_argv(
-        **common, videos=[("up.mp4", 11)], images=[("mask.png", 22)])
+        **common, videos=["up.mp4"], images=["mask.png"])
     joined = " ".join(argv)
     assert "--type videoEdit" in joined
-    assert "--video-asset-id 11" in joined and "--asset-id 22" in joined
+    assert "--video up.mp4" in joined and "--image mask.png" in joined
     assert "--keep-original-sound" in joined
-    preview = task_mod.build_generate_argv(
-        **common, videos=[("up.mp4", None)], preview=True)
-    assert "--video-asset-id <video-asset-id>" in " ".join(preview)
+    for flag in ("--video-asset-id", "--asset-id"):
+        assert flag not in joined
 
 
 def test_build_generate_argv_auto_aspect_omits_the_flag():
@@ -283,13 +280,13 @@ def test_build_generate_argv_auto_aspect_omits_the_flag():
     argv = task_mod.build_generate_argv(
         prompt="p", model_id=37, mode="videoEdit", duration_s=13,
         resolution="1080p", aspect_ratio="auto", num=1,
-        videos=[("up.mp4", 11)])
+        videos=["up.mp4"])
     assert "--aspect-ratio" not in argv
 
     argv = task_mod.build_generate_argv(
         prompt="p", model_id=37, mode="videoEdit", duration_s=13,
         resolution="1080p", aspect_ratio="21:9", num=1,
-        videos=[("up.mp4", 11)])
+        videos=["up.mp4"])
     assert "--aspect-ratio" in argv and "21:9" in argv
 
 
@@ -297,20 +294,21 @@ def test_build_generate_argv_carries_multiple_refs():
     argv = task_mod.build_generate_argv(
         prompt="p", model_id=37, mode="allMediaRef", duration_s=8,
         resolution="1080p", aspect_ratio="16:9", num=1,
-        videos=[("v1.mp4", 11), ("v2.mp4", 12)],
-        images=[("i1.png", 21), ("i2.png", 22)])
+        videos=["v1.mp4", "v2.mp4"],
+        images=["i1.png", "i2.png"])
     joined = " ".join(argv)
-    assert joined.count("--video ") == 2 and joined.count("--video-asset-id") == 2
-    assert joined.count("--image ") == 2 and joined.count("--asset-id") == 2
+    assert joined.count("--video ") == 2
+    assert joined.count("--image ") == 2
+    assert "--video-asset-id" not in joined and "--asset-id" not in joined
     assert argv.index("v2.mp4") > argv.index("v1.mp4")
-    assert argv.index("v1.mp4") < argv.index("11")
+    assert argv.index("v1.mp4") < argv.index("i1.png")
 
 
 def test_build_generate_argv_first_last_frame():
     argv = task_mod.build_generate_argv(
         prompt="p", model_id=37, mode="firstLastFrame", duration_s=13,
         resolution="1080p", aspect_ratio="16:9", num=1,
-        first_image=("first.png", None), last_image=("last.png", None))
+        first_image="first.png", last_image="last.png")
     joined = " ".join(argv)
     assert "--first-image first.png" in joined
     assert "--last-image last.png" in joined
@@ -332,14 +330,14 @@ def test_build_generate_argv_passes_project_session_id():
     argv = task_mod.build_generate_argv(
         prompt="p", model_id=37, mode="videoEdit", duration_s=13,
         resolution="1080p", aspect_ratio="auto", num=1,
-        videos=[("up.mp4", 11)], session_id=2060150528006080)
+        videos=["up.mp4"], session_id=2060150528006080)
     joined = " ".join(argv)
     assert "--session-id 2060150528006080" in joined
 
     argv = task_mod.build_generate_argv(
         prompt="p", model_id=37, mode="videoEdit", duration_s=13,
         resolution="1080p", aspect_ratio="auto", num=1,
-        videos=[("up.mp4", 11)], session_id=0)
+        videos=["up.mp4"], session_id=0)
     assert "--session-id" not in argv
 
 
@@ -412,20 +410,11 @@ class _Proc2:
         self.stdout, self.returncode, self.stderr = stdout, returncode, ""
 
 
-def _dispatch(calls: list | None = None, *, stale_ids: tuple[int, ...] = ()):
+def _dispatch(calls: list | None = None):
     def run(argv, timeout):
         joined = " ".join(argv)
         if calls is not None:
             calls.append(joined)
-        if "virtual-ip info" in joined:
-            asset = int(joined.split("info")[-1].strip())
-            if asset in stale_ids:
-                return _Proc2(json.dumps({"code": -400,
-                                          "msg": "第1个资产不存在或不属于当前企业"}))
-            return _Proc2(json.dumps({"code": 0, "data": {"status": "active"}}))
-        if "virtual-ip upload" in joined:
-            asset = 22 if "--type image" in joined else 11
-            return _Proc2(json.dumps({"code": 0, "data": {"assetId": asset}}))
         if "video generate" in joined:
             return _Proc2(json.dumps({"code": 0, "data": {"taskId": 7}}))
         if "task status" in joined:
@@ -437,70 +426,22 @@ def _dispatch(calls: list | None = None, *, stale_ids: tuple[int, ...] = ()):
     return run
 
 
-def _asset_run(tmp_path, asset_id: int | None = 11):
-    video = tmp_path / "up.mp4"
-    video.write_bytes(b"v")
-    store = RunStore(tmp_path / "runs")
-    run = store.create(run_key("p", video, None, {}), params={}, prompt="p", upload=video)
-    run.assets = {"video:v1": asset_id} if asset_id else {}
-    run.save()
-    return run
-
-
-def test_recorded_asset_is_verified_and_replaced_when_foreign(tmp_path):
+def test_execute_round_runs_to_the_end_and_records_everything(tmp_path, monkeypatch):
     calls: list[str] = []
-    run = _asset_run(tmp_path, asset_id=99)
-    client = Mglc(binary="mglc-fake", runner=_dispatch(calls, stale_ids=(99,)))
-    ids = ensure_assets(client, run,
-                        refs=[("video:v1", "video", run.upload["path"])],
-                        poll=False, log=Log(quiet=True))
-    assert ids["video:v1"] == 11
-    assert any("no longer usable" in n for n in run.notes)
+    conf, pkg, prepared, client = _fake_round(monkeypatch, tmp_path, calls=calls)
+    outcome = pipe.execute_round(conf, pkg, prepared, client=client, log=Log(quiet=True))
 
-
-def test_recorded_asset_that_is_still_valid_is_not_re_uploaded(tmp_path):
-    calls: list[str] = []
-    run = _asset_run(tmp_path, asset_id=99)
-    client = Mglc(binary="mglc-fake", runner=_dispatch(calls))
-    ids = ensure_assets(client, run,
-                        refs=[("video:v1", "video", run.upload["path"])],
-                        poll=False, log=Log(quiet=True))
-    assert ids["video:v1"] == 99
-    assert not any("virtual-ip upload" in c for c in calls)
-
-
-def test_an_unreadable_review_status_is_not_mistaken_for_pending(tmp_path):
-    calls: list[str] = []
-    run = _asset_run(tmp_path, asset_id=99)
-
-    def runner(argv, timeout):
-        joined = " ".join(argv)
-        calls.append(joined)
-        if "virtual-ip info" in joined:
-            asset = int(joined.split("info")[-1].strip())
-            if asset == 99:
-                return _Proc2(json.dumps({"code": 0, "data": {"assetId": 99}}))
-            return _Proc2(json.dumps({"code": 0, "data": {"status": "active"}}))
-        if "virtual-ip upload" in joined:
-            return _Proc2(json.dumps({"code": 0, "data": {"assetId": 11}}))
-        return _Proc2(json.dumps({"code": 0, "data": {}}))
-
-    client = Mglc(binary="mglc-fake", runner=runner)
-    assert classify("") == "unknown"
-    assert asset_state(client, 99) == "unreadable"
-    ids = ensure_assets(client, run,
-                        refs=[("video:v1", "video", run.upload["path"])],
-                        poll=False, log=Log(quiet=True))
-    assert ids["video:v1"] == 11
-
-
-def test_extract_asset_id_and_status_readers():
-    assert extract_asset_id({"data": {"assetId": 77}}) == 77
-    assert extract_asset_id({"result": {"portraitAssetId": "88"}}) == 88
-    assert status_of({"auditStatus": "Active"}) == "active"
-    assert classify("processing") == "pending"
-    with pytest.raises(AigcError):
-        extract_asset_id({"nothing": "useful"})
+    assert outcome.submitted == 7
+    assert outcome.run.stage == "checked"
+    assert outcome.result is not None and Path(outcome.result).is_file()
+    assert outcome.gate is not None and outcome.gate["verdict"] == "ok"   # 通用闸门
+    joined = " | ".join(calls)
+    assert "video generate" in joined
+    # 决策 75：不再有手动 SD 合规登记这一步。
+    assert "virtual-ip upload" not in joined and "virtual-ip info" not in joined
+    assert len([c for c in calls if "video generate" in c]) == 1
+    generate = [c for c in calls if "video generate" in c][0]
+    assert "--video-asset-id" not in generate and "--asset-id" not in generate
 
 
 # ------------------------------------------------------------ round: pipeline
@@ -931,22 +872,6 @@ def _fake_round(monkeypatch, tmp_path, *, calls: list | None = None):
     return conf, _pkg(tmp_path, video, mask, runs), prepared, client
 
 
-def test_execute_round_runs_to_the_end_and_records_everything(tmp_path, monkeypatch):
-    calls: list[str] = []
-    conf, pkg, prepared, client = _fake_round(monkeypatch, tmp_path, calls=calls)
-    outcome = pipe.execute_round(conf, pkg, prepared, client=client, log=Log(quiet=True))
-
-    assert outcome.submitted == 7
-    assert outcome.run.stage == "checked"
-    assert outcome.result is not None and Path(outcome.result).is_file()
-    assert outcome.gate is not None and outcome.gate["verdict"] == "ok"   # 通用闸门
-    joined = " | ".join(calls)
-    assert "virtual-ip upload" in joined and "video generate" in joined
-    assert len([c for c in calls if "video generate" in c]) == 1
-    generate = [c for c in calls if "video generate" in c][0]
-    assert "--video-asset-id 11" in generate and "--asset-id 22" in generate
-
-
 def test_the_task_id_reaches_the_user_before_the_wait(tmp_path, monkeypatch):
     conf, pkg, prepared, client = _fake_round(monkeypatch, tmp_path)
     seen: list[int] = []
@@ -981,18 +906,19 @@ def test_execute_round_refuses_a_failed_round(tmp_path, monkeypatch):
     assert "9" in str(excinfo.value) and "--resubmit" in str(excinfo.value)
 
 
-def test_a_round_past_prepare_still_re_verifies_its_assets(tmp_path, monkeypatch):
+def test_a_legacy_round_with_recorded_assets_still_submits(tmp_path, monkeypatch):
+    """决策 75 的读兼容：旧台账带 assets 与 assets_ready stage 时原样提交，不触发
+    任何 virtual-ip 调用，也不因资产记录失效而拒绝。"""
     calls: list[str] = []
     conf, pkg, prepared, _ = _fake_round(monkeypatch, tmp_path, calls=calls)
-    prepared.run.advance("assets_ready")
+    prepared.run.stage = "assets_ready"     # 旧 stage 名：只作历史事实，不在 STAGES 里
     prepared.run.assets = {"video:clip": 99, "image:mask": 98}
     prepared.run.save()
 
-    client = Mglc(binary="mglc-fake", runner=_dispatch(calls, stale_ids=(98, 99)))
+    client = Mglc(binary="mglc-fake", runner=_dispatch(calls))
     outcome = pipe.execute_round(conf, pkg, prepared, client=client, log=Log(quiet=True))
-    assert sum("virtual-ip upload" in c for c in calls) == 2
-    assert outcome.run.assets["video:clip"] == 11
-    assert outcome.run.assets["image:mask"] == 22
+    assert outcome.submitted == 7
+    assert not any("virtual-ip" in c for c in calls)
 
 
 # ------------------------------------------------------- round: the call log

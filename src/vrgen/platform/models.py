@@ -13,8 +13,9 @@ What is verified today (2026-09-23, ``GET /api/v1/aitools/videoModelList``):
   becomes a span of the output timeline. 2.0/2.0 Fast accept a video only through
   ``allMediaRef``, which is a *semantic* reference: the output does not preserve the
   input's frame-by-frame structure, so it cannot be used for a redundant-band task;
-* Seedance reads reference media only together with an SD-compliance asset id
-  (``supportVirtualIp``), so ``round.assets`` is mandatory on that path.
+* Seedance's reference media used to require a matching SD-compliance asset id
+  (``supportVirtualIp``); since decision 75 the platform registers reference media
+  itself at generate time, so the flag is no longer parsed or consulted.
 """
 
 from __future__ import annotations
@@ -39,7 +40,6 @@ class ModeLimits:
     """One ``referenceModes`` entry: what a generation mode accepts."""
 
     mode: str
-    support_virtual_ip: bool
     max_count: int
     resolutions: tuple[str, ...] = ()
     default_resolution: str = ""
@@ -74,7 +74,7 @@ class ModeLimits:
         span = (f"{dur.get('min')}-{dur.get('max')}s"
                 if dur.get("type") == "range" else "locked to the input")
         return (f"{self.mode}: video={'yes' if self.takes_video else 'no'}"
-                f" (max {self.max_count})  asset_id={'required' if self.support_virtual_ip else 'not used'}"
+                f" (max {self.max_count})"
                 f"  {span}  {list(self.resolutions)}")
 
 
@@ -140,7 +140,6 @@ def parse_models(items: Iterable[Mapping[str, Any]]) -> list[ModelInfo]:
                 continue
             modes[mode] = ModeLimits(
                 mode=mode,
-                support_virtual_ip=bool(entry.get("supportVirtualIp")),
                 max_count=int(entry.get("maxCount") or 0),
                 resolutions=tuple(str(r) for r in (entry.get("resolutions") or ())),
                 default_resolution=str(entry.get("defaultResolution") or ""),
@@ -154,7 +153,6 @@ def parse_models(items: Iterable[Mapping[str, Any]]) -> list[ModelInfo]:
         if text2video and "text2video" not in modes:
             modes["text2video"] = ModeLimits(
                 mode="text2video",
-                support_virtual_ip=False,
                 max_count=int(cfg.get("defaultGenerateCount") or 1),
                 resolutions=tuple(str(r) for r in (text2video.get("resolutions") or ())),
                 default_resolution=str(text2video.get("defaultResolution") or ""),

@@ -33,9 +33,11 @@ def test_run_round_trip_and_contract_fields(tmp_path):
     assert back.gate == run.gate and back.result == run.result
     import json
     raw = json.loads((tmp_path / "abc123" / RUN_JSON).read_text(encoding="utf-8"))
-    for field_ in ("key", "stage", "params", "prompt", "assets", "task_id",
+    for field_ in ("key", "stage", "params", "prompt", "task_id",
                    "result", "gate", "notes"):
         assert field_ in raw, f"契约字段缺失: {field_}"
+    # assets 已退役（决策 75）：新轮次不再写该字段，读取方按缺省处理。
+    assert "assets" not in raw
 
 
 # ── prompt-vars：--set 自适应的核心 ──────────────────────────────────────

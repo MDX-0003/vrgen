@@ -41,22 +41,25 @@ _WM_MARKERS = ("wm", "watermark", "watermarked")
 
 def build_generate_argv(*, prompt: str, model_id: int, mode: str, duration_s: int,
                         resolution: str, aspect_ratio: str, num: int,
-                        videos: list[tuple[str | Path, int | None]] | None = None,
-                        images: list[tuple[str | Path, int | None]] | None = None,
-                        first_image: tuple[str | Path, int | None] | None = None,
-                        last_image: tuple[str | Path, int | None] | None = None,
+                        videos: list[str | Path] | None = None,
+                        images: list[str | Path] | None = None,
+                        first_image: str | Path | None = None,
+                        last_image: str | Path | None = None,
                         session_id: int | None = None,
-                        keep_sound: bool = True,
-                        preview: bool = False) -> list[str]:
+                        keep_sound: bool = True) -> list[str]:
     """The ``mglc video generate`` arguments for one round.
 
     两种输入形状共享这个 builder：
 
-    * ``videos`` / ``images`` -- 提交清单，每项 ``(path, asset_id)``，按提示词
+    * ``videos`` / ``images`` -- 提交清单，每项就是上传件的本地路径，按提示词
       编号顺序（视频在前、图片在后，mask 追加在图片末尾）；
     * ``first_image`` / ``last_image`` -- firstLastFrame 的两张固定帧。它们映射到
-      ``--first-image`` / ``--last-image``，不产生 ``--video`` / ``--image`` /
-      ``--asset-id`` 对。
+      ``--first-image`` / ``--last-image``，不产生 ``--video`` / ``--image`` 对。
+
+    参考素材**只传本地路径**：平台在 generate 时自动上传登记（决策 75，
+    2026-11-04 起）。不再有 ``--video-asset-id`` / ``--asset-id``——手动登记的资产
+    与平台自动登记的记录对不上，任务会异步失败报
+    「第 1 个参考资产不属于目标 IP 库或与文件不匹配」。
 
     ``--duration`` is passed even for an editing task, where the platform reports
     ``duration.type = ""`` (i.e. the timeline is the input's): the CLI marks the flag
@@ -67,12 +70,6 @@ def build_generate_argv(*, prompt: str, model_id: int, mode: str, duration_s: in
     and without this flag the model returns a **silent** file -- so the deliverable
     loses its soundtrack at this link. Measured on the first real round (2026-09-23):
     source aac -> padded aac -> returned nothing -> final nothing.
-
-    ``preview=True`` substitutes placeholders for missing asset ids instead of
-    refusing, so the command can be shown to a human before anything was uploaded.
-    The real path stays strict: a request without its SD-compliance ids is rejected
-    by the service, and finding that out from a human reading the command is cheaper
-    than finding out from a failed task.
     """
     argv = ["--prompt", prompt,
             "--model-id", str(int(model_id)),
@@ -88,8 +85,8 @@ def build_generate_argv(*, prompt: str, model_id: int, mode: str, duration_s: in
         if first_image is None or last_image is None:
             raise AigcError("firstLastFrame needs both a first frame and a last frame")
         # 输出比例跟随首尾图；模型详情里该模式 ratios 为空，不传 --aspect-ratio。
-        argv += ["--first-image", str(first_image[0]),
-                 "--last-image", str(last_image[0])]
+        argv += ["--first-image", str(first_image),
+                 "--last-image", str(last_image)]
         if session_id:
             argv += ["--session-id", str(int(session_id))]
         return argv
@@ -104,26 +101,13 @@ def build_generate_argv(*, prompt: str, model_id: int, mode: str, duration_s: in
         argv += ["--aspect-ratio", str(aspect_ratio)]
     if keep_sound:
         argv.append("--keep-original-sound")
-    for path, asset_id in videos:
+    for path in videos:
         argv += ["--video", str(path)]
-        if asset_id is None:
-            if not preview:
-                raise AigcError("Seedance requires a matching SD-compliance asset id for "
-                                "every reference video; run `vrgen submit` again after the "
-                                "asset step")
-            asset_id = "<video-asset-id>"
-        argv += ["--video-asset-id", str(asset_id)]
     if session_id:
         # 项目生成会话：平台的计费上下文跟随会话，额度走项目而不是个人。
         argv += ["--session-id", str(int(session_id))]
-    for path, asset_id in images:
+    for path in images:
         argv += ["--image", str(path)]
-        if asset_id is None:
-            if not preview:
-                raise AigcError("the reference image also needs an asset id for Seedance; "
-                                "run `vrgen submit` again after the asset step")
-            asset_id = "<image-asset-id>"
-        argv += ["--asset-id", str(asset_id)]
     return argv
 
 
@@ -192,19 +176,17 @@ def submit(client: Mglc, run: Run, *, confirm: bool = False, timeout: float = 30
         last = by_role.get("last_frame")
         if first is None or last is None:
             raise AigcError("firstLastFrame round is missing its first_frame or last_frame")
-        first_image = (str(first["upload"]), None)
-        last_image = (str(last["upload"]), None)
-        videos: list[tuple[str | Path, int | None]] = []
-        images: list[tuple[str | Path, int | None]] = []
+        first_image = str(first["upload"])
+        last_image = str(last["upload"])
+        videos: list[str] = []
+        images: list[str] = []
     else:
-        videos = [(str(item["upload"]), run.assets.get(f"video:{item['id']}"))
-                  for item in refs if item.get("kind") == "video"]
+        # 参考素材只传本地路径，平台 generate 时自动上传登记（决策 75）。
+        videos = [str(item["upload"]) for item in refs if item.get("kind") == "video"]
         # mask 固定追加在所有图片之后；其余图片保持清单顺序。
-        images = [(str(item["upload"]), run.assets.get(f"image:{item['id']}"))
-                  for item in refs
+        images = [str(item["upload"]) for item in refs
                   if item.get("kind") == "image" and item.get("role") != "mask"]
-        images += [(str(item["upload"]), run.assets.get(f"image:{item['id']}"))
-                   for item in refs if item.get("role") == "mask"]
+        images += [str(item["upload"]) for item in refs if item.get("role") == "mask"]
     argv = build_generate_argv(
         prompt=run.prompt,
         model_id=int(run.params["video_model_id"]),
