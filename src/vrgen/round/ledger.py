@@ -279,6 +279,22 @@ def write_command(run: Run, argv: Sequence[str], *, spend: bool) -> Path:
     return path
 
 
+def _loggable_data(data: Any) -> Any:
+    """The reply payload as it may be written to the call log.
+
+    Signed URLs (``fileUrl`` and friends) carry auth query strings that are pure
+    noise in a log -- long, secrets-adjacent, and invalid within days -- so every
+    URL keeps its path and loses everything after ``?``.
+    """
+    if isinstance(data, Mapping):
+        return {key: _loggable_data(value) for key, value in data.items()}
+    if isinstance(data, (list, tuple)):
+        return [_loggable_data(item) for item in data]
+    if isinstance(data, str) and data.startswith(("http://", "https://")):
+        return data.split("?", 1)[0]
+    return data
+
+
 def append_call_log(run: Run, calls: Sequence, *, mode: str) -> Path:
     """Append one invocation's external calls to the round's log.
 
@@ -288,8 +304,12 @@ def append_call_log(run: Run, calls: Sequence, *, mode: str) -> Path:
     what succeeded, which is exactly why the first "asset does not belong to this
     enterprise" was invisible afterwards.
 
-    ``calls`` are :class:`~vrpad.aigc.platform.client.Envelope` objects; only the
-    fields worth re-reading by eye are written (when, code, argv, message).
+    ``calls`` are :class:`~vrpad.aigc.platform.client.Envelope` objects; each one
+    writes when, code, argv, message, and the reply payload. ``msg: OK`` only says
+    the request was accepted -- the business answer (asset id, review state, task
+    id, ``failReason``) lives in ``data``, and a log without it cannot answer "what
+    did the platform actually say" after the fact. Signed URL query strings are
+    stripped from the payload before it is written.
     """
     path = run.dir / CALL_LOG
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -301,6 +321,10 @@ def append_call_log(run: Run, calls: Sequence, *, mode: str) -> Path:
                      f"code={envelope.code}  {shell_line(envelope.argv)}")
         if envelope.msg:
             lines.append(f"    msg: {envelope.msg}")
+        data = _loggable_data(getattr(envelope, "data", None))
+        if data not in (None, {}, []):
+            lines.append(f"    data: "
+                         f"{json.dumps(data, ensure_ascii=False, separators=(',', ':'))}")
     with path.open("a", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")
     return path
