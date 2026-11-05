@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import typer
@@ -25,6 +26,8 @@ from .platform.media import probe_image, probe_input
 from .platform.models import dropdown_models, find_model, load_image_models, load_models
 from .prep import params as params_mod
 from .prep import prompt as prompt_mod
+from .prep import uploads
+from .prep.scale import parse_size_mode, plain_geometry, scaled_geometry
 from .progress import Log
 from .round import image as image_mod
 from .round import kinds as kinds_mod
@@ -383,6 +386,121 @@ def _rounds_line(job: str, workdir) -> None:
     rows = RunStore(jobs.job_dir(workdir, job)).summary()
     if rows:
         print(f"rounds      {len(rows)} recorded ({', '.join(rows)})")
+
+
+# ── 上传件准备：不建轮次、不碰平台（决策 87）────────────────────────────
+
+
+@app.command()
+def prep(
+    video: Path = typer.Option(..., "--video", exists=True, dir_okay=False,
+                               help="要按平台限额缩放的母版视频。"),
+    mask: Path = typer.Option(None, "--mask", exists=True, dir_okay=False,
+                              help="与母版配套的 mask；给了就缩到同一尺寸。"),
+    canvas: str = typer.Option(..., "--canvas", help="画布尺寸 WxH。"),
+    source: str = typer.Option(..., "--source", help="源尺寸 WxH。"),
+    out: Path = typer.Option(..., "--out", help="上传件输出目录。"),
+    scale: str = typer.Option(None, "--scale",
+                              help="vrgen 自有上传缩放：auto|full|half（缺省取配置）。"),
+    video_model_id: int = typer.Option(None, "--video-model-id",
+                                       help="← mglc --model-id；fullredraw 固定 37。"),
+    mode: str = typer.Option(None, "--mode", help="← mglc --type；fullredraw 固定 videoEdit。"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只打印规划，不写文件。"),
+    job: str = typer.Option(None, "--job",
+                            help="模型清单缓存放进该 job 目录（缺省放 workdir 根）。"),
+    workdir: Path = typer.Option(None, "--workdir", help="台账根（默认 $VRGEN_RUNS_DIR）。"),
+    config: Path = typer.Option(None, "--config", help="TOML 配置文件。"),
+) -> None:
+    """按平台限额准备上传件：写视频、mask 与参数 JSON，不建轮次、不提交。"""
+    log = Log()
+    try:
+        overrides: list[str] = []
+        if scale is not None:
+            overrides.append(f"mglc.scale={scale}")
+        if video_model_id is not None:
+            overrides.append(f"mglc.video_model_id={video_model_id}")
+        if mode is not None:
+            overrides.append(f"mglc.mode={mode}")
+        conf = config_mod.load(config, overrides)
+        canvas_size = _parse_wh(canvas, "--canvas")
+        source_size = _parse_wh(source, "--source")
+        cache_dir = jobs.job_dir(workdir, job) if job else jobs.resolve_workdir(workdir)
+        models = load_models(cache_dir, url=str(conf.get("mglc.model_list_url")),
+                             max_age_h=float(conf.get("mglc.models_max_age_h", 24.0)),
+                             log=log)
+        model = find_model(models, int(conf.get("mglc.video_model_id")))
+        limits = model.mode(str(conf.get("mglc.mode")))
+        if not limits.takes_video:
+            raise UsageError(f"mode {limits.mode} 不接受输入视频，没有可准备的上传件")
+        validator = limits.ref_video_limits()
+        mode_name, explicit = parse_size_mode(str(conf.get("mglc.scale")))
+        plan = uploads.plan_video("pad", video, conf=conf, validator=validator,
+                                  mode_name=mode_name, explicit=explicit)
+        if tuple(canvas_size) == tuple(source_size):
+            geometry = plain_geometry(canvas_size, plan.size)
+        else:
+            geometry = scaled_geometry(canvas_size, source_size, plan.size)
+        mask_plan = None
+        if mask is not None:
+            mask_plan = uploads.plan_mask(
+                "pad_mask", mask, conf=conf, canvas_size=geometry.canvas_size,
+                validator=limits.ref_image_limits())
+
+        print(f"model       {model.code} {model.name}  mode {limits.mode}")
+        print(f"canvas      {canvas_size[0]}x{canvas_size[1]}   "
+              f"source {source_size[0]}x{source_size[1]}")
+        print(f"limit       {int(validator.get('maxPixel') or 0):,} px   "
+              f"{int(validator.get('maxBytes') or 0):,} B")
+        suffix = "" if plan.needs_scale else "  (already fits, no re-encode)"
+        print(f"video       {video.name} -> {plan.size[0]}x{plan.size[1]}{suffix}")
+        if mask_plan is not None:
+            print(f"mask        {mask.name} -> "
+                  f"{mask_plan.size[0]}x{mask_plan.size[1]}")
+        if dry_run:
+            print("dry-run     nothing written")
+            return
+
+        out.mkdir(parents=True, exist_ok=True)
+        path, width, height = uploads.materialize(
+            plan, out, conf=conf, log=log,
+            image_validator=limits.ref_image_limits(), video_validator=validator)
+        record: dict[str, object] = {
+            "canvas": [canvas_size[0], canvas_size[1]],
+            "source": [source_size[0], source_size[1]],
+            "upload": {"path": str(path), "width": width, "height": height,
+                       "pixels": width * height},
+            "mask": None,
+            "scaled": plan.needs_scale,
+            "scale": str(conf.get("mglc.scale")),
+            "scale_percent": round(100 * geometry.scale, 1),
+            "band": ({"P": 0, "L": 0} if geometry.band_w == 0 else
+                     {"P": geometry.P, "L": geometry.band_w,
+                      "regions": {"G": list(geometry.region_left),
+                                  "R": list(geometry.region_main),
+                                  "B": list(geometry.region_right)}}),
+            "limit": {"max_pixel": int(validator.get("maxPixel") or 0),
+                      "max_bytes": int(validator.get("maxBytes") or 0)},
+            "video_model_id": model.code,
+            "mode": limits.mode,
+            "created_utc": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "tool": {"name": "vrgen", "version": __version__},
+        }
+        if mask_plan is not None:
+            mask_path, mask_w, mask_h = uploads.materialize(
+                mask_plan, out, conf=conf, log=log,
+                image_validator=limits.ref_image_limits())
+            record["mask"] = {"path": str(mask_path),
+                              "width": mask_w, "height": mask_h}
+            print(f"mask        {mask_path}")
+        sidecar = out / f"upload_pad_{width}x{height}.json"
+        sidecar.write_text(json.dumps(record, ensure_ascii=False, indent=1) + "\n",
+                           encoding="utf-8")
+        print(f"upload      {path}")
+        print(f"params      {sidecar}")
+    except VrgenError as exc:
+        _fail(exc)
+    finally:
+        log.close()
 
 
 # ── 图片生成：关键帧工作台（契约 case-model.md §4）──────────────────────

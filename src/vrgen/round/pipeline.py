@@ -22,24 +22,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import refs as refs_mod
-from ..errors import AigcError, BudgetError, LedgerError, TaskFailed, UsageError
+from ..errors import AigcError, LedgerError, TaskFailed, UsageError
 from ..paths import sha256_16, templates_dir
 from ..platform.client import Mglc
-from ..platform.media import (
-    probe_image,
-    probe_input,
-    scale_image,
-    scale_reference_image,
-    scale_video,
-    strip_audio,
-)
+from ..platform.media import strip_audio
 from ..platform.models import ModeLimits, ModelInfo, find_model, load_models
-from ..prep.budget import InputSpec, check_image, check_input, fit_image_size
+from ..prep import uploads
+from ..prep.budget import InputSpec
 from ..prep.params import effective_aspect
 from ..prep.prompt import geometry_variables, render, resolve_template
 from ..prep.scale import (
     UploadGeometry,
-    choose_upload_size,
     parse_size_mode,
     plain_geometry,
     scaled_geometry,
@@ -116,7 +109,7 @@ def _duration_range(limits: ModeLimits) -> tuple[int, int] | None:
 
 def _gen_duration(conf, limits: ModeLimits, *, source: str,
                   master_spec: InputSpec,
-                  planned: list[tuple[refs_mod.RefAsset, InputSpec, tuple[int, int], bool]]
+                  planned: list[uploads.UploadPlan]
                   ) -> tuple[int, str]:
     """Resolve a round's duration: explicit > longest video > default 4."""
     configured = int(conf.get("mglc.duration_s", 0) or 0)
@@ -128,7 +121,7 @@ def _gen_duration(conf, limits: ModeLimits, *, source: str,
                 f"{span[0]}-{span[1]} 秒")
         return configured, source
     if source == "longest":
-        videos = [p[1] for p in planned if p[0].kind == "video"]
+        videos = [p.spec for p in planned if p.kind == "video"]
         if videos:
             return _duration_s(conf, max(videos, key=lambda spec: spec.duration_s)), source
         return 4, "none"
@@ -199,44 +192,17 @@ def _prepare_refs(conf, pkg: InputPackage, *, log,
     # run_key 要等提示词渲染完才算；缩放在这之前完成，落在轮次目录里。先算 key
     # 需要 run 目录，所以先建一个临时 store 目录名——与旧路径一样，用最终 key
     # 建目录；缩放件在目录建好后再写。这里先收集目标尺寸，建 run 后再落盘。
-    planned: dict[str, tuple[refs_mod.RefAsset, InputSpec, tuple[int, int], bool]] = {}
+    planned: dict[str, uploads.UploadPlan] = {}
     for asset in pkg.refs:
         if asset.role == "mask":
             continue                      # mask 的上传尺寸取决于母版，稍后补
         if asset.kind == "video":
-            spec = probe_input(asset.path, conf)
-            report = check_input(spec, video_validator)
-            labels = {c.label for c in report.failures}
-            if labels - {"pixels", "size"}:
-                raise BudgetError(
-                    f"素材 {asset.id} 不合约：\n"
-                    + "\n".join("  " + c.line() for c in report.failures))
-            upload_size = (spec.width, spec.height)
-            if report.failures:
-                upload_size = explicit or choose_upload_size(
-                    (spec.width, spec.height), mode=mode_name, spec=spec,
-                    max_pixels=max_pixels, max_bytes=max_bytes)
-                if upload_size == (spec.width, spec.height):
-                    raise BudgetError(
-                        f"素材 {asset.id} 在当前 --scale={mode_name} 下仍不合约：\n"
-                        + "\n".join("  " + c.line() for c in report.failures))
+            planned[asset.id] = uploads.plan_video(
+                asset.id, asset.path, conf=conf, validator=video_validator,
+                mode_name=mode_name, explicit=explicit)
         else:
-            spec = probe_image(asset.path, conf)
-            report = check_image(spec, image_validator)
-            labels = {c.label for c in report.failures}
-            if labels - {"pixels", "size", "width", "height"}:
-                raise BudgetError(
-                    f"素材 {asset.id} 不合约：\n"
-                    + "\n".join("  " + c.line() for c in report.failures))
-            upload_size = (spec.width, spec.height)
-            if report.failures:
-                upload_size = fit_image_size(spec, image_validator)
-                if upload_size == (spec.width, spec.height):
-                    raise BudgetError(
-                        f"素材 {asset.id} 无法通过缩放满足图片限制：\n"
-                        + "\n".join("  " + c.line() for c in report.failures))
-        planned[asset.id] = (asset, spec, upload_size,
-                             upload_size != (spec.width, spec.height))
+            planned[asset.id] = uploads.plan_image(
+                asset.id, asset.path, conf=conf, validator=image_validator)
 
     master_asset = refs_mod.master(pkg.refs)
     master_plan = planned.get(master_asset.id)
@@ -245,37 +211,26 @@ def _prepare_refs(conf, pkg: InputPackage, *, log,
     if limits.mode == "firstLastFrame":
         first_plan = planned[next(a.id for a in pkg.refs if a.role == "first_frame")]
         last_plan = planned[next(a.id for a in pkg.refs if a.role == "last_frame")]
-        if (first_plan[1].width, first_plan[1].height) != (last_plan[1].width,
-                                                           last_plan[1].height):
+        if first_plan.size != last_plan.size:
             raise UsageError(
                 "firstLastFrame 的首帧与尾帧宽高必须一致："
-                f"{first_plan[1].width}x{first_plan[1].height} vs "
-                f"{last_plan[1].width}x{last_plan[1].height}")
+                f"{first_plan.size[0]}x{first_plan.size[1]} vs "
+                f"{last_plan.size[0]}x{last_plan.size[1]}")
 
-    canvas = pkg.canvas_size or (master_plan[1].width, master_plan[1].height)
+    canvas = pkg.canvas_size or (master_plan.spec.width, master_plan.spec.height)
     source = pkg.source_size or canvas
     if tuple(canvas) == tuple(source):
-        geometry = plain_geometry(canvas, master_plan[2])
+        geometry = plain_geometry(canvas, master_plan.size)
     else:
-        geometry = scaled_geometry(canvas, source, master_plan[2])
+        geometry = scaled_geometry(canvas, source, master_plan.size)
 
     # mask 是内部控制图：强制缩放到母版的上传画布，不按图片预算 fit。
     for asset in pkg.refs:
         if asset.role != "mask":
             continue
-        spec = probe_image(asset.path, conf)
-        upload_size = tuple(geometry.canvas_size)
-        # 体积在缩放重编码后才成立，这里只看宽高、像素与比例。
-        report = check_image(InputSpec(width=upload_size[0], height=upload_size[1],
-                                       fps=0.0, duration_s=0.0,
-                                       size_bytes=0, container=spec.container),
-                             image_validator)
-        if not report.ok:
-            raise BudgetError(
-                f"mask {asset.id} 缩放到母版上传画布 {upload_size[0]}x{upload_size[1]} "
-                f"后仍不合约：\n"
-                + "\n".join("  " + c.line() for c in report.failures))
-        planned[asset.id] = (asset, spec, upload_size, upload_size != (spec.width, spec.height))
+        planned[asset.id] = uploads.plan_mask(
+            asset.id, asset.path, conf=conf, canvas_size=geometry.canvas_size,
+            validator=image_validator)
 
     variables: dict[str, object] = dict(geometry_variables(geometry))
     variables.update(pkg.variables)
@@ -287,10 +242,11 @@ def _prepare_refs(conf, pkg: InputPackage, *, log,
     ordered = [planned[a.id] for a in pkg.refs]
     duration_source = refs_mod.duration_source(limits.mode)
     duration_s, duration_source = _gen_duration(
-        conf, limits, source=duration_source, master_spec=master_plan[1], planned=ordered)
+        conf, limits, source=duration_source, master_spec=master_plan.spec,
+        planned=ordered)
 
     refs_params = []
-    for asset, _spec, upload_size, _needs_scale in ordered:
+    for asset, plan in zip(pkg.refs, ordered, strict=True):
         refs_params.append({
             "id": asset.id,
             "kind": asset.kind,
@@ -298,8 +254,8 @@ def _prepare_refs(conf, pkg: InputPackage, *, log,
             "path": str(asset.path),
             "sha256": asset.sha256 or sha256_16(asset.path),
             "upload": str(asset.path),
-            "width": upload_size[0],
-            "height": upload_size[1],
+            "width": plan.size[0],
+            "height": plan.size[1],
         })
     params = {
         "backend": "mglc",
@@ -310,7 +266,7 @@ def _prepare_refs(conf, pkg: InputPackage, *, log,
         "aspect_ratio": aspect,
         "num": int(conf.get("mglc.num", 1)),
         "session_id": int(conf.get("mglc.session_id", 0)),
-        "scale": f"{master_plan[2][0]}x{master_plan[2][1]}",
+        "scale": f"{master_plan.size[0]}x{master_plan.size[1]}",
         "keep_sound": (bool(conf.get("mglc.keep_original_sound", True))
                        and str(conf.get("mglc.audio", "keep")) != "none"
                        and any(a.kind == "video" for a in pkg.refs)),
@@ -324,7 +280,7 @@ def _prepare_refs(conf, pkg: InputPackage, *, log,
     }
 
     store = RunStore(pkg.workdir)
-    extra = {"refs": [[p[0].id, sha256_16(p[0].path)] for p in ordered]}
+    extra = {"refs": [[plan.asset_id, sha256_16(plan.src)] for plan in ordered]}
     key = run_key(prompt, master_asset.path, None, params, extra)
     if resubmit_token:
         # --resubmit is a new take, not a retry: refuse while the previous round is
@@ -342,7 +298,7 @@ def _prepare_refs(conf, pkg: InputPackage, *, log,
     if existing is not None:
         log.warn(f"this round already exists: {existing.dir.name} "
                  f"(stage {existing.stage}) -- reusing it")
-        return Prepared(model, limits, geometry, master_plan[1], existing, reused=True)
+        return Prepared(model, limits, geometry, master_plan.spec, existing, reused=True)
 
     run = store.create(key, label=pkg.template, params=params, prompt=prompt)
     if resubmit_token:
@@ -351,37 +307,14 @@ def _prepare_refs(conf, pkg: InputPackage, *, log,
     log.step(f"round {run.dir.name}")
 
     prepared_upload: dict[str, tuple[Path, int, int]] = {}
-    for (asset, spec, upload_size, needs_scale), info in zip(ordered, refs_params,
-                                                             strict=True):
-        if needs_scale:
-            if asset.role == "mask":
-                upload = scale_image(asset.path,
-                                     run.dir / f"upload_{asset.id}_{upload_size[0]}x{upload_size[1]}.png",
-                                     upload_size, config=conf)
-                measured = probe_image(upload, conf)
-                recheck = check_image(measured, image_validator)
-            elif asset.kind == "video":
-                upload = scale_video(
-                    asset.path, run.dir / f"upload_{asset.id}_{upload_size[0]}x{upload_size[1]}.mp4",
-                    upload_size, config=conf, crf=int(conf.get("mglc.upload_crf", 16)), log=log)
-                measured = probe_input(upload, conf)
-                recheck = check_input(measured, video_validator)
-            else:
-                upload = scale_reference_image(
-                    asset.path,
-                    run.dir / f"upload_{asset.id}_{upload_size[0]}x{upload_size[1]}.png",
-                    upload_size, config=conf)
-                measured = probe_image(upload, conf)
-                recheck = check_image(measured, image_validator)
-            if not recheck.ok:
-                raise BudgetError(
-                    f"素材 {asset.id} 缩放后仍不合约：\n"
-                    + "\n".join("  " + c.line() for c in recheck.failures))
+    for plan, info in zip(ordered, refs_params, strict=True):
+        upload, width, height = uploads.materialize(
+            plan, run.dir, conf=conf, log=log,
+            image_validator=image_validator, video_validator=video_validator)
+        if plan.needs_scale:
             info["upload"] = str(upload)
-            info["width"], info["height"] = measured.width, measured.height
-            prepared_upload[asset.id] = (Path(upload), measured.width, measured.height)
-        else:
-            prepared_upload[asset.id] = (Path(asset.path), spec.width, spec.height)
+            info["width"], info["height"] = width, height
+        prepared_upload[plan.asset_id] = (upload, width, height)
 
     # 清单现场：断点续跑与人工复查都以它为准（契约 case-model.md §4）。
     (run.dir / "refs.json").write_text(
@@ -397,7 +330,7 @@ def _prepare_refs(conf, pkg: InputPackage, *, log,
     run.params["refs"] = refs_params
     run.save()
     log.info(f"prompt -> {run.prompt_path}")
-    return Prepared(model, limits, geometry, master_plan[1], run)
+    return Prepared(model, limits, geometry, master_plan.spec, run)
 
 
 # ---- remote half -----------------------------------------------------------

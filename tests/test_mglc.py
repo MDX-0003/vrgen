@@ -22,6 +22,7 @@ from vrgen.config import ConfigError
 from vrgen.errors import AigcError, BudgetError, LedgerError, TaskFailed, UsageError
 from vrgen.platform.client import Envelope, Mglc
 from vrgen.platform.models import find_model, load_models, parse_models
+from vrgen.prep import uploads as uploads_mod
 from vrgen.prep.budget import InputSpec, check_input, suggest_size
 from vrgen.prep.prompt import geometry_variables, render
 from vrgen.prep.scale import choose_upload_size, parse_size_mode, scaled_geometry
@@ -492,17 +493,17 @@ def _offline(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
         return InputSpec(width=width, height=height, fps=0.0, duration_s=0.0,
                          size_bytes=100_000, container=("png",))
 
-    monkeypatch.setattr(pipe, "probe_input", fake_probe)
-    monkeypatch.setattr(pipe, "probe_image", fake_probe_image)
+    monkeypatch.setattr(uploads_mod, "probe_input", fake_probe)
+    monkeypatch.setattr(uploads_mod, "probe_image", fake_probe_image)
 
     def fake_scale(src, dst, size, **kw):
         Path(dst).parent.mkdir(parents=True, exist_ok=True)
         Path(dst).write_bytes(b"scaled")
         return Path(dst)
 
-    monkeypatch.setattr(pipe, "scale_video", fake_scale)
-    monkeypatch.setattr(pipe, "scale_image", fake_scale)
-    monkeypatch.setattr(pipe, "scale_reference_image", fake_scale)
+    monkeypatch.setattr(uploads_mod, "scale_video", fake_scale)
+    monkeypatch.setattr(uploads_mod, "scale_image", fake_scale)
+    monkeypatch.setattr(uploads_mod, "scale_reference_image", fake_scale)
 
     video = tmp_path / "canvas.mp4"
     video.write_bytes(b"canvas-bytes")
@@ -667,16 +668,16 @@ def test_prepare_round_gen_multi_assets(tmp_path, monkeypatch):
         return InputSpec(width=1920, height=1080, fps=30.0, duration_s=duration,
                          size_bytes=1_000_000, container=("mp4",))
 
-    monkeypatch.setattr(pipe, "probe_input", fake_probe)
-    monkeypatch.setattr(pipe, "probe_image", lambda path, conf: InputSpec(
+    monkeypatch.setattr(uploads_mod, "probe_input", fake_probe)
+    monkeypatch.setattr(uploads_mod, "probe_image", lambda path, conf: InputSpec(
         width=1000, height=1000, fps=0.0, duration_s=0.0,
         size_bytes=500_000, container=("png",)))
 
     def no_scale(*args, **kwargs):
         raise AssertionError("素材已经合格，不该缩放")
 
-    monkeypatch.setattr(pipe, "scale_video", no_scale)
-    monkeypatch.setattr(pipe, "scale_reference_image", no_scale)
+    monkeypatch.setattr(uploads_mod, "scale_video", no_scale)
+    monkeypatch.setattr(uploads_mod, "scale_reference_image", no_scale)
 
     v1 = tmp_path / "v1.mp4"
     v2 = tmp_path / "v2.mp4"
@@ -734,14 +735,14 @@ def _firstlast_offline(tmp_path, monkeypatch, *, duration: int | None = None):
     monkeypatch.setattr(pipe, "templates_dir", lambda: templates)
     runs = tmp_path / "runs"
     _model_cache_multi(runs / "j")
-    monkeypatch.setattr(pipe, "probe_image", lambda path, conf: InputSpec(
+    monkeypatch.setattr(uploads_mod, "probe_image", lambda path, conf: InputSpec(
         width=1920, height=1080, fps=0.0, duration_s=0.0,
         size_bytes=500_000, container=("png",)))
 
     def no_scale(*args, **kwargs):
         raise AssertionError("首尾帧已合格，不该缩放")
 
-    monkeypatch.setattr(pipe, "scale_reference_image", no_scale)
+    monkeypatch.setattr(uploads_mod, "scale_reference_image", no_scale)
     overrides = ["mglc.mode=firstLastFrame"]
     if duration is not None:
         overrides.append(f"mglc.duration_s={duration}")
@@ -785,7 +786,7 @@ def test_prepare_round_rejects_two_edit_masters(tmp_path, monkeypatch):
     monkeypatch.setattr(pipe, "templates_dir", lambda: templates)
     runs = tmp_path / "runs"
     _model_cache_multi(runs / "j")
-    monkeypatch.setattr(pipe, "probe_input", lambda path, conf: InputSpec(
+    monkeypatch.setattr(uploads_mod, "probe_input", lambda path, conf: InputSpec(
         width=1920, height=1080, fps=30.0, duration_s=5.0,
         size_bytes=1_000_000, container=("mp4",)))
     v1 = tmp_path / "v1.mp4"
