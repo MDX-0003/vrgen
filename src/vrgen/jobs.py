@@ -30,6 +30,7 @@ PROMPT_VARS = "prompt-vars.toml"
 #: 模板占位里由素材与模式在 submit 时计算的只读键（决策 25）。它们不属于
 #: ``--set`` 的草稿变量，也不允许写进 prompt-vars.toml。
 COMPUTED_KEYS = ("asset_list", "task_rule", "timeline_rule", "image_roles",
+                 "image_roles_section", "detail_rule", "lighting_rule",
                  "mask_note", "mask_ban")
 
 #: job 名只允许这组字符：它是台账树的目录名，不能让它逃出 workdir。

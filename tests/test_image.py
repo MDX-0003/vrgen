@@ -304,6 +304,33 @@ def test_image_roles_text_covers_lighting_ref():
     assert "图3 = lighting_ref。" not in text
 
 
+def test_image_roles_section_hidden_for_base_frame_only():
+    assert image_mod.image_roles_section_text(["first_frame_raw"]) == ""
+    assert image_mod.image_roles_section_text(["last_frame_raw"]) == ""
+
+
+def test_image_roles_section_kept_for_anchor_or_refs():
+    anchor = image_mod.image_roles_section_text(["last_frame_raw", "first_frame"])
+    assert "图1 = 尾帧原始图" in anchor
+    assert "图2 = 首帧定稿图" in anchor
+    refs = image_mod.image_roles_section_text(["first_frame_raw", "subject_ref"])
+    assert "图2 = 人物三视图" in refs
+
+
+def test_image_role_variables_conditions():
+    vars = image_mod.image_role_variables(["first_frame_raw"])
+    assert vars["image_roles_section"] == ""
+    assert vars["detail_rule"] == ""
+    assert vars["lighting_rule"] == ""
+    vars = image_mod.image_role_variables(
+        ["first_frame_raw", "detail_ref", "lighting_ref"],
+        ["", "头冠纹样", "暖色侧光"])
+    assert vars["image_roles_section"].startswith("图1 = 首帧原始图")
+    assert "细节参考图" in vars["detail_rule"]
+    assert "氛围与光影参考图" in vars["lighting_rule"]
+    assert "头冠纹样" in vars["image_roles"]
+
+
 def test_full_redraw_img_template_renders(tmp_path):
     images = _images(tmp_path)
     root = tmp_path / "runs"
@@ -482,9 +509,58 @@ def test_prompt_show_renders_image_roles(tmp_path):
         "--workdir", str(root)])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert "image_roles" in payload["computed_keys"]
+    assert "image_roles_section" in payload["computed_keys"]
+    assert "detail_rule" in payload["computed_keys"]
+    assert "lighting_rule" in payload["computed_keys"]
     assert "图1 = 首帧原始图" in payload["rendered"]
     assert "图2 = 人物三视图" in payload["rendered"]
+
+
+def test_prompt_show_hides_roles_section_without_refs(tmp_path):
+    root = tmp_path / "runs"
+    _seed_keyframe_vars(root)
+    result = runner.invoke(vrgen_cli.app, [
+        "prompt", "show", "--job", "j",
+        "--template", "keyframe-first", "--vars-file", "keyframe-vars.toml",
+        "--image-role", "first_frame_raw",
+        "--workdir", str(root)])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert "【参考图分工】" not in payload["rendered"]
+    assert "图1 = 首帧原始图" not in payload["rendered"]
+    assert "【细节保持】" not in payload["rendered"]
+    assert "【光线保持】" not in payload["rendered"]
+
+
+def test_prompt_show_keeps_roles_section_for_anchor_only(tmp_path):
+    root = tmp_path / "runs"
+    _seed_keyframe_vars(root)
+    result = runner.invoke(vrgen_cli.app, [
+        "prompt", "show", "--job", "j",
+        "--template", "keyframe-last", "--vars-file", "keyframe-vars.toml",
+        "--image-role", "last_frame_raw", "--image-role", "first_frame",
+        "--workdir", str(root)])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert "【参考图分工】" in payload["rendered"]
+    assert "图2 = 首帧定稿图" in payload["rendered"]
+
+
+def test_prompt_show_detail_and_lighting_rules(tmp_path):
+    root = tmp_path / "runs"
+    _seed_keyframe_vars(root)
+    result = runner.invoke(vrgen_cli.app, [
+        "prompt", "show", "--job", "j",
+        "--template", "keyframe-first", "--vars-file", "keyframe-vars.toml",
+        "--image-role", "first_frame_raw", "--image-role", "subject_ref",
+        "--image-role", "detail_ref", "--image-role", "lighting_ref",
+        "--image-note", "", "--image-note", "", "--image-note", "头冠纹样",
+        "--image-note", "暖色侧光",
+        "--workdir", str(root)])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert "【细节保持】参考图分工里标注为「细节参考图」" in payload["rendered"]
+    assert "【光线保持】参考图分工里标注为「氛围与光影参考图」" in payload["rendered"]
 
 
 def test_keyframe_vars_file_isolated(tmp_path):

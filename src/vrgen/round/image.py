@@ -61,6 +61,44 @@ def image_roles_text(roles: list[str] | tuple[str, ...],
     return "\n".join(lines)
 
 
+#: 首尾帧图片步的底图角色；只有它们时不需要【参考图分工】段。
+BASE_FRAME_ROLES = ("first_frame_raw", "last_frame_raw")
+
+DETAIL_RULE = "参考图分工里标注为「细节参考图」的图只贡献所指细节；不取它们的构图、背景与姿态。"
+LIGHTING_RULE = ("参考图分工里标注为「氛围与光影参考图」的图只贡献光线、色温与明暗对比；"
+                 "不取它的构图、背景、人物与画面内容。")
+
+
+def image_roles_section_text(roles: list[str] | tuple[str, ...],
+                             notes: list[str] | tuple[str, ...] | None = None) -> str:
+    """整段【参考图分工】的正文；只有底图时返回空，让模板行被整行删掉。
+
+    没有参考图也没有首帧定稿时，图1 就是唯一的输入，开头「以图1为底图」已经
+    说清楚；再列一段「图1 = 原始帧」只是重复。尾帧步骤即使0 张参考图，也会因为
+    多一张首帧定稿而保留这一段。
+    """
+    if not any(role not in BASE_FRAME_ROLES for role in roles):
+        return ""
+    return image_roles_text(roles, notes)
+
+
+def image_role_variables(roles: list[str] | tuple[str, ...],
+                         notes: list[str] | tuple[str, ...] | None = None) -> dict[str, str]:
+    """图片步模板的四个计算键：分工正文、整段分工、细节句、光线句。
+
+    三个条件键的空字符串会配合 ``prompt.render`` 的「只剩标题就删行」规则，
+    让模板不写 if 也能按角色出现或消失。
+    """
+    role_list = list(roles)
+    note_list = list(notes or ())
+    return {
+        "image_roles": image_roles_text(role_list, note_list),
+        "image_roles_section": image_roles_section_text(role_list, note_list),
+        "detail_rule": DETAIL_RULE if "detail_ref" in role_list else "",
+        "lighting_rule": LIGHTING_RULE if "lighting_ref" in role_list else "",
+    }
+
+
 def build_image_argv(*, prompt: str, model_id: int, images: list[str | Path],
                      ratio: str, resolution: str, num: int,
                      session_id: int | None = None) -> list[str]:

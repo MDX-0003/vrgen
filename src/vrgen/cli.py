@@ -617,7 +617,7 @@ def image_submit(
         roles, notes = _image_role_args(image_roles, image_notes)
         resolved_prompt = prompt
         if template:
-            extra = {"image_roles": image_mod.image_roles_text(roles, notes)}
+            extra = image_mod.image_role_variables(roles, notes)
             if bool(canvas) != bool(source):
                 raise UsageError("--canvas 与 --source 必须成对给出")
             if canvas:
@@ -828,7 +828,7 @@ def _prompt_preview(payload: dict, *, workdir, job: str,
             variables.update(prompt_mod.geometry_from_sizes(
                 _parse_wh(canvas, "--canvas"), _parse_wh(source, "--source")))
         if image_roles:
-            variables["image_roles"] = image_mod.image_roles_text(image_roles, image_notes)
+            variables.update(image_mod.image_role_variables(image_roles, image_notes))
         payload["rendered"] = prompt_mod.render(text, variables)
         payload["render_error"] = None
     except (VrgenError, OSError, ValueError) as exc:
