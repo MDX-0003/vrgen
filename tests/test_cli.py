@@ -246,6 +246,16 @@ def _params_offline(tmp_path, monkeypatch):
         vrgen_cli, "_image_models_payload",
         lambda conf, workdir, job: (
             [{"id": 44, "name": "专业图片-2.5", "description": ""}], ""))
+    monkeypatch.setattr(
+        vrgen_cli, "_image_model_detail_payload",
+        lambda conf, workdir, job, model_id, name="": ({
+            "model_id": model_id,
+            "name": name or "专业图片-2.5",
+            "ratios": ["1:1", "9:16", "16:9", "3:2", "2:3", "3:4", "4:3", "21:9"],
+            "resolutions": ["1K", "2K", "4K"],
+            "max_num": 4,
+            "default_num": 4,
+        }, ""))
     monkeypatch.setattr(vrgen_cli, "probe_input", lambda path, conf: InputSpec(
         width=4668, height=2000, fps=30.0, duration_s=7.979,
         size_bytes=228_200_000, container=("mp4",)))
@@ -534,16 +544,26 @@ def test_params_show_lists_models_for_the_dropdown(tmp_path, monkeypatch):
         {"id": 37, "name": "Seedance 2.5", "description": ""}]
     assert data["image_models"] == [
         {"id": 44, "name": "专业图片-2.5", "description": ""}]
+    assert data["image"]["model_id"] == 44
+    assert data["image"]["name"] == "专业图片-2.5"
+    assert data["image"]["resolutions"] == ["1K", "2K", "4K"]
+    assert "16:9" in data["image"]["ratios"]
 
 
 class _FakeImageClient:
-    def __init__(self, *, data=None, error=None):
-        self._data, self._error = data, error
+    def __init__(self, *, data=None, error=None, detail=None):
+        self._data, self._error, self._detail = data, error, detail
 
     def model_list(self, model_type, **extra):
+        assert extra == {}          # 当前 mglc 不接受 --page-size
         if self._error:
             raise self._error
         return SimpleNamespace(data=self._data)
+
+    def model_detail(self, model_id, model_type="image"):
+        if self._error:
+            raise self._error
+        return SimpleNamespace(ok=True, msg="", data=self._detail)
 
 
 def test_image_models_payload_fetches_and_degrades(tmp_path, monkeypatch):
@@ -576,6 +596,50 @@ def test_image_models_payload_fetches_and_degrades(tmp_path, monkeypatch):
     fresh = tmp_path / "empty"
     entries, error = vrgen_cli._image_models_payload(stale_conf, fresh, "j1")
     assert entries == [] and "未登录" in error
+
+
+def test_image_model_detail_payload_fetches_and_degrades(tmp_path, monkeypatch):
+    import vrgen.platform.binpath as binpath
+    import vrgen.platform.client as client_mod
+    from vrgen import config as config_mod
+
+    conf = config_mod.load()
+    stale_conf = config_mod.load(overrides=["mglc.models_max_age_h=0"])
+    detail = {
+        "componentSettings": {
+            "defaultGenerateCount": 4,
+            "generateCountOptions": [1, 2, 3, 4],
+            "ratios": ["1:1", "16:9", "21:9"],
+            "resolutions": ["2K", "4K"],
+        },
+        "modelId": 25,
+        "name": "Seedream 4.5",
+        "type": "image",
+    }
+    monkeypatch.setattr(binpath, "find_mglc", lambda conf: "mglc-fake")
+    monkeypatch.setattr(client_mod, "Mglc",
+                        lambda **kw: _FakeImageClient(detail=detail))
+
+    row, error = vrgen_cli._image_model_detail_payload(conf, tmp_path, "j1", 25)
+    assert error == ""
+    assert row == {"model_id": 25, "name": "Seedream 4.5",
+                   "ratios": ["1:1", "16:9", "21:9"],
+                   "resolutions": ["2K", "4K"],
+                   "max_num": 4, "default_num": 4}
+    assert (tmp_path / "j1" / "models_image_25.json").is_file()
+
+    # 缓存过期 + mglc 失败 → 陈旧缓存顶上
+    monkeypatch.setattr(client_mod, "Mglc",
+                        lambda **kw: _FakeImageClient(error=RuntimeError("未登录")))
+    row, error = vrgen_cli._image_model_detail_payload(stale_conf, tmp_path, "j1", 25)
+    assert error == "" and row["resolutions"] == ["2K", "4K"]
+
+    # 无缓存 + 失败 → 保留 id 与列表里的名字，档位交给页面兜底
+    fresh = tmp_path / "empty"
+    row, error = vrgen_cli._image_model_detail_payload(
+        stale_conf, fresh, "j1", 25, "Seedream 4.5")
+    assert row == {"model_id": 25, "name": "Seedream 4.5"}
+    assert "未登录" in error
 
 
 def test_params_save_persists_project_and_episode_for_the_ui(tmp_path, monkeypatch):

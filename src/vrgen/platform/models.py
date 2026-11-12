@@ -331,3 +331,86 @@ def load_image_models(workdir: str | Path, *,
     if log is not None:
         log.info(f"image model list: {len(items)} entries")
     return parse_image_models(items)
+
+
+# ── 单个图片模型的能力（ratio / resolution / 候选数）────────────────────
+# 列表接口只给 displayName 与 description；比例与分辨率档位在详情接口的
+# componentSettings 里。按 (job, model_id) 缓存，避免每次 params show 都起一次
+# mglc 子进程。
+
+@dataclass(frozen=True)
+class ImageModelDetail:
+    code: int
+    name: str
+    ratios: tuple[str, ...]
+    resolutions: tuple[str, ...]
+    max_num: int
+    default_num: int
+
+
+def parse_image_model_detail(model_id: int,
+                             data: Mapping[str, Any]) -> ImageModelDetail:
+    """把 ``mglc model --type image --model-id`` 的 data 解析成能力表。
+
+    平台字段名是 ``name``（列表接口给的是 ``displayName``）。缺名称视为
+    详情不可用：页面至少还能用列表里的名字，而不是退化成 id。
+    """
+    settings = data.get("componentSettings")
+    settings = settings if isinstance(settings, Mapping) else {}
+    name = str(data.get("name") or data.get("displayName") or "").strip()
+    if not name:
+        raise AigcError(f"图片模型 {model_id} 详情缺少名称")
+    ratios = tuple(str(value).strip() for value in settings.get("ratios") or ()
+                   if str(value).strip())
+    resolutions = tuple(str(value).strip() for value in settings.get("resolutions") or ()
+                        if str(value).strip())
+    counts: list[int] = []
+    for raw in settings.get("generateCountOptions") or ():
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            counts.append(value)
+    max_num = max(counts) if counts else 4
+    default_num = int(settings.get("defaultGenerateCount") or max_num)
+    default_num = min(max(default_num, 1), max_num)
+    return ImageModelDetail(
+        code=int(model_id), name=name, ratios=ratios, resolutions=resolutions,
+        max_num=max_num, default_num=default_num)
+
+
+def load_image_model_detail(workdir: str | Path, model_id: int, *,
+                            fetcher: Callable[[], Mapping[str, Any]],
+                            refresh: bool = False, max_age_h: float = 24.0,
+                            log=None) -> ImageModelDetail:
+    """单个图片模型的能力表，24h 缓存；失败时用陈旧缓存顶上。"""
+    path = Path(workdir) / f"models_image_{int(model_id)}.json"
+    cached: Mapping[str, Any] | None = None
+    age_h = None
+    if path.is_file():
+        try:
+            blob = json.loads(path.read_text(encoding="utf-8"))
+            data = blob.get("data")
+            cached = data if isinstance(data, Mapping) else None
+            age_h = (time.time() - float(blob.get("fetched_at", 0))) / 3600.0
+        except (json.JSONDecodeError, TypeError, ValueError, OSError):
+            cached = None
+
+    fresh = cached is not None and age_h is not None and age_h <= max_age_h
+    if fresh and not refresh:
+        return parse_image_model_detail(model_id, cached)
+
+    try:
+        data = fetcher()
+    except Exception as exc:
+        if cached is not None:
+            if log is not None:
+                log.warn(f"image model {model_id} detail fetch failed ({exc}); using "
+                         f"the cache from {age_h:.1f}h ago")
+            return parse_image_model_detail(model_id, cached)
+        raise
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"fetched_at": time.time(), "model_id": int(model_id),
+                                "data": data}, ensure_ascii=False), encoding="utf-8")
+    return parse_image_model_detail(model_id, data)

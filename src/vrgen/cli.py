@@ -23,7 +23,13 @@ from .errors import TaskFailed, UsageError, VrgenError
 from .paths import templates_dir
 from .platform.client import Mglc
 from .platform.media import probe_image, probe_input
-from .platform.models import dropdown_models, find_model, load_image_models, load_models
+from .platform.models import (
+    dropdown_models,
+    find_model,
+    load_image_model_detail,
+    load_image_models,
+    load_models,
+)
 from .prep import params as params_mod
 from .prep import prompt as prompt_mod
 from .prep import uploads
@@ -135,7 +141,7 @@ def _image_models_payload(conf, workdir, job) -> tuple[list[dict], str]:
     client = Mglc(config=conf, binary=find_mglc(conf) or "mglc")
 
     def fetch() -> list[dict]:
-        data = client.model_list("image", page_size=100).data
+        data = client.model_list("image").data
         items = data.get("items") if isinstance(data, dict) else None
         if not isinstance(items, list):
             raise VrgenError(f"mglc model list --type image 返回形状异常：{str(data)[:120]}")
@@ -150,6 +156,47 @@ def _image_models_payload(conf, workdir, job) -> tuple[list[dict], str]:
                 for m in entries], ""
     except Exception as exc:                    # mglc 缺席/未登录/网络失败都算
         return [], f"图片模型清单暂时读不了：{exc}"
+
+
+def _image_model_detail_payload(conf, workdir, job, model_id: int,
+                                name: str = "") -> tuple[dict, str]:
+    """当前图片模型的能力表：比例、分辨率档位与候选数上限。
+
+    列表接口只给名字，档位在单模型详情里。读不到时仍返回 model_id 与列表
+    里的名字，页面可以显示模型但把档位退回兜底值。
+    """
+    from .platform.binpath import find_mglc
+    from .platform.client import Mglc
+    client = Mglc(config=conf, binary=find_mglc(conf) or "mglc")
+
+    def fetch() -> dict:
+        payload = client.model_detail(model_id, "image")
+        if not payload.ok:
+            raise VrgenError(f"mglc model --type image --model-id {model_id} 失败："
+                             f"{payload.msg or payload.stdout[:120]}")
+        if not isinstance(payload.data, dict):
+            raise VrgenError(f"图片模型 {model_id} 详情形状异常："
+                             f"{str(payload.data)[:120]}")
+        return payload.data
+
+    try:
+        detail = load_image_model_detail(
+            jobs.job_dir(workdir, job), model_id, fetcher=fetch,
+            max_age_h=float(conf.get("mglc.models_max_age_h", 24.0)),
+            log=Log(quiet=True))
+        return {
+            "model_id": detail.code,
+            "name": detail.name,
+            "ratios": list(detail.ratios),
+            "resolutions": list(detail.resolutions),
+            "max_num": detail.max_num,
+            "default_num": detail.default_num,
+        }, ""
+    except Exception as exc:
+        row: dict = {"model_id": int(model_id)}
+        if name:
+            row["name"] = name
+        return row, f"图片模型能力暂时读不了：{exc}"
 
 
 def _parse_kv(items: list[str] | None) -> dict[str, str]:
@@ -911,6 +958,12 @@ def params_show(
             if saved.image_model_id is not None
             else conf.get("mglc.image_model_id", 44))
         image_models, image_models_error = _image_models_payload(conf, workdir, job)
+        image_model_name = next(
+            (row["name"] for row in image_models if row["id"] == image_model_id), "")
+        image, image_error = _image_model_detail_payload(
+            conf, workdir, job, image_model_id, image_model_name)
+        if image_error:
+            image["error"] = image_error
         aspect = params_mod.effective_aspect(str(conf.get("mglc.aspect_ratio")),
                                              limits.ratios)
         modes = [
@@ -935,6 +988,7 @@ def params_show(
             "image_models": image_models,
             **({"image_models_error": image_models_error}
                if image_models_error else {}),
+            "image": image,
             "current": {
                 "resolution": str(conf.get("mglc.resolution")),
                 "scale": str(conf.get("mglc.scale")),
