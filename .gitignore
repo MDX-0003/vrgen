@@ -13,5 +13,12 @@ __pycache__/
 # 机器本地配置覆盖（默认值在 config/default.toml）
 vrgen.toml
 
+# PyInstaller 构建产物（build-installer.ps1 默认写到工作区根，这里兜底）
+/build/
+/dist/
+
+# 测试运行的临时产物：TEMP 不可用时 tempfile 回退到仓库根
+pytest-of-*/
+
 # 系统
 Thumbs.db
