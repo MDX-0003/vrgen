@@ -13,7 +13,7 @@ from pathlib import Path
 from vrgen import refs, roles
 
 SPEC = Path(roles.__file__).with_name("roles.json")
-CONTRACT_SHA256 = "f74d3603d32bb816eb37b582a96147631797cfe4ac653b165b40ad6aabc47529"
+CONTRACT_SHA256 = "06fccbcf9d594d3b4345ea9d984006906a771bef8ee84ba8af9723f04a7d82c8"
 
 
 def _entries() -> list[dict]:
